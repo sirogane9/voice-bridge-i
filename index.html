@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>マイク中継ページ</title>
+<style>
+  html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
+  .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
+  h1{font-size:15px;font-weight:700;color:#b9975f;margin:0 0 18px;}
+  .status{font-size:15px;font-weight:700;line-height:1.6;padding:14px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.2);}
+  .status.s-wait{border-color:rgba(255,255,255,.35);}
+  .status.s-busy{border-color:#6F97AE;background:rgba(111,151,174,.18);}
+  .status.s-rec{border-color:#E0626E;background:rgba(224,98,110,.18);}
+  .status.s-ok{border-color:#5FB37A;background:rgba(95,179,122,.18);}
+  .status.s-err{border-color:#E0626E;background:rgba(224,98,110,.24);}
+  .sub{font-size:12px;font-weight:400;color:#c9c9c9;margin-top:8px;min-height:1.4em;}
+  button{margin-top:20px;padding:8px 20px;border-radius:20px;border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;font-size:13px;cursor:pointer;display:none;}
+  button:active{background:rgba(255,255,255,.12);}
+  .note{font-size:11px;color:#999;margin-top:24px;line-height:1.7;text-align:left;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎤 マイク中継ページ</h1>
+  <div class="status s-wait" id="status">起動しています…</div>
+  <div class="sub" id="sub"></div>
+  <button type="button" id="closeBtn">閉じる</button>
+  <p class="note">これはAIキャラアプリのマイクを中継するためだけの小さなページです。録音した音や聞き取った文字は、ここから直接どこか外に送られることはありません。元のアプリの画面（開いた時の親ウィンドウ）にだけ送り返します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
+</div>
+<script>
+(function(){
+  'use strict';
+  var opener=window.opener;
+  var statusEl=document.getElementById('status');
+  var subEl=document.getElementById('sub');
+  var closeBtn=document.getElementById('closeBtn');
+  function setStatus(kind,text,sub){
+    statusEl.className='status s-'+kind;
+    statusEl.textContent=text;
+    subEl.textContent=sub||'';
+  }
+  closeBtn.style.display='';
+  closeBtn.addEventListener('click',function(){window.close();});
+
+  if(!opener){
+    setStatus('err','このページは、AIキャラアプリの方から🎤やライブを押して開いてください。','直接この画面だけを開いても、マイクの中継はできません。');
+    return;
+  }
+
+  function send(msg){try{opener.postMessage(msg,'*');}catch(_){}}
+  var readyTimer=setInterval(function(){send({type:'vb-ready'});},350);
+  send({type:'vb-ready'});
+  setTimeout(function(){clearInterval(readyTimer);},4000);
+
+  var SR=window.SpeechRecognition||window.webkitSpeechRecognition||null;
+  var curRec=null;      /* MediaRecorder */
+  var curStream=null;
+  var curSR=null;       /* SpeechRecognition */
+  var recStart=0;
+
+  function stopTracks(st){try{if(st)st.getTracks().forEach(function(t){t.stop();});}catch(_){}}
+  function pickMime(){
+    var list=['audio/webm;codecs=opus','audio/webm','audio/mp4','audio/ogg;codecs=opus'];
+    for(var i=0;i<list.length;i++){try{if(window.MediaRecorder&&MediaRecorder.isTypeSupported&&MediaRecorder.isTypeSupported(list[i]))return list[i];}catch(_){}}
+    return '';
+  }
+  function blobToBase64(blob){
+    return new Promise(function(resolve,reject){
+      var fr=new FileReader();
+      fr.onload=function(){
+        var s=String(fr.result||''),i=s.indexOf(',');
+        resolve(i>=0?s.slice(i+1):s);
+      };
+      fr.onerror=function(){reject(fr.error||new Error('read failed'));};
+      fr.readAsDataURL(blob);
+    });
+  }
+  function collect(ev){
+    var fin='',itm='',last='';
+    for(var i=0;i<ev.results.length;i++){
+      var x=ev.results[i],t=String((x&&x[0]&&x[0].transcript)||'');
+      if(x.isFinal){if(last&&t.indexOf(last)===0)fin=fin.slice(0,fin.length-last.length)+t;else fin+=t;last=t;}
+      else itm+=t;
+    }
+    return {fin:fin,itm:itm};
+  }
+
+  async function startRecord(){
+    if(curRec)return;
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-record-error',name:'unsupported',message:'getUserMedia not available'});return;}
+    setStatus('busy','マイクを準備しています…','許可を聞かれたら「許可」を選んでください。');
+    var stream;
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
+    catch(e){send({type:'vb-record-error',name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','許可の設定を確かめてから、元のアプリでもう一度お試しください。');return;}
+    curStream=stream;
+    var mime=pickMime(),rec;
+    try{rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);}
+    catch(e2){stopTracks(stream);curStream=null;send({type:'vb-record-error',name:'recorder',message:String(e2&&e2.message||e2)});return;}
+    var chunks=[];recStart=Date.now();
+    rec.ondataavailable=function(ev){if(ev.data&&ev.data.size)chunks.push(ev.data);};
+    rec.onstop=async function(){
+      stopTracks(curStream);curStream=null;
+      var wasCancelled=rec._cancelled;curRec=null;
+      if(wasCancelled){send({type:'vb-record-cancelled'});setStatus('wait','待機中…（このまま置いておいてください）','');return;}
+      var durationMs=Date.now()-recStart;
+      var blob=new Blob(chunks,{type:String(rec.mimeType||mime||'audio/webm').split(';')[0]});
+      setStatus('busy','音声を送っています…','');
+      try{
+        var b64=await blobToBase64(blob);
+        send({type:'vb-audio',base64:b64,mime:blob.type,durationMs:durationMs});
+        setStatus('ok','送りました。元のアプリの画面に戻ってください。','');
+      }catch(e3){send({type:'vb-record-error',name:'encode',message:String(e3&&e3.message||e3)});}
+    };
+    curRec=rec;
+    try{rec.start(1000);}catch(e4){stopTracks(stream);curStream=null;curRec=null;send({type:'vb-record-error',name:'start',message:String(e4&&e4.message||e4)});return;}
+    send({type:'vb-record-started'});
+    setStatus('rec','● 録音中です','話し終えたら、元のアプリの画面で止めてください。');
+  }
+  function stopRecord(){if(curRec&&curRec.state!=='inactive'){try{curRec.stop();}catch(_){}}else if(!curRec)send({type:'vb-record-cancelled'});}
+  function cancelRecord(){
+    if(curRec){
+      curRec._cancelled=true;
+      try{if(curRec.state!=='inactive')curRec.stop();else{stopTracks(curStream);curStream=null;curRec=null;send({type:'vb-record-cancelled'});}}catch(_){}
+    }else send({type:'vb-record-cancelled'});
+  }
+
+  function startListen(lang,continuous){
+    if(!SR){send({type:'vb-listen-error',code:'not-supported'});return;}
+    if(curSR)return;
+    var sr;try{sr=new SR();}catch(e){send({type:'vb-listen-error',code:'start'});return;}
+    curSR=sr;sr.lang=lang||'ja-JP';sr.continuous=!!continuous;sr.interimResults=true;
+    sr.onresult=function(ev){var c=collect(ev);send({type:'vb-listen-result',fin:c.fin,itm:c.itm});};
+    sr.onerror=function(ev){var c=ev&&ev.error;send({type:'vb-listen-error',code:c||'error'});};
+    sr.onend=function(){curSR=null;send({type:'vb-listen-end'});setStatus('wait','待機中…（このまま置いておいてください）','');};
+    try{sr.start();}catch(e2){curSR=null;send({type:'vb-listen-error',code:'start'});return;}
+    send({type:'vb-listen-started'});
+    setStatus('rec','● 聞いています','元のアプリの画面で話してください。');
+  }
+  function stopListen(){if(curSR){try{curSR.stop();}catch(_){}}}
+  function abortListen(){if(curSR){var sr=curSR;curSR=null;try{sr.onresult=sr.onerror=sr.onend=null;sr.abort();}catch(_){}}setStatus('wait','待機中…（このまま置いておいてください）','');}
+
+  async function micCheck(){
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-mic-check-result',ok:false,name:'unsupported',message:'getUserMedia not available'});return;}
+    setStatus('busy','マイクを確かめています…','');
+    var stream;
+    try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}
+    catch(e){send({type:'vb-mic-check-result',ok:false,name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','');return;}
+    stopTracks(stream);
+    send({type:'vb-mic-check-result',ok:true});
+    setStatus('ok','マイクが使えます','');
+  }
+
+  window.addEventListener('message',function(ev){
+    if(ev.source!==opener)return;
+    var d=ev.data;if(!d||typeof d!=='object')return;
+    if(d.type==='vb-start-record')startRecord();
+    else if(d.type==='vb-stop-record')stopRecord();
+    else if(d.type==='vb-cancel-record')cancelRecord();
+    else if(d.type==='vb-start-listen')startListen(d.lang,d.continuous);
+    else if(d.type==='vb-stop-listen')stopListen();
+    else if(d.type==='vb-abort-listen')abortListen();
+    else if(d.type==='vb-mic-check')micCheck();
+  });
+  window.addEventListener('beforeunload',function(){send({type:'vb-closing'});});
+  window.addEventListener('pagehide',function(){send({type:'vb-closing'});});
+  setStatus('wait','待機中…（このまま置いておいてください）','');
+})();
+</script>
+</body>
+</html>
