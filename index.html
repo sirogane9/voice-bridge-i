@@ -2,56 +2,106 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>マイク中継ページ</title>
 <style>
   html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
   .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
-  h1{font-size:15px;font-weight:700;color:#b9975f;margin:0 0 18px;}
+  h1{font-size:15px;font-weight:700;color:#d3b47f;margin:0 0 18px;}
   .status{font-size:15px;font-weight:700;line-height:1.6;padding:14px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.2);}
   .status.s-wait{border-color:rgba(255,255,255,.35);}
   .status.s-busy{border-color:#6F97AE;background:rgba(111,151,174,.18);}
   .status.s-rec{border-color:#E0626E;background:rgba(224,98,110,.18);}
   .status.s-ok{border-color:#5FB37A;background:rgba(95,179,122,.18);}
   .status.s-err{border-color:#E0626E;background:rgba(224,98,110,.24);}
-  .sub{font-size:12px;font-weight:400;color:#c9c9c9;margin-top:8px;min-height:1.4em;}
-  button{margin-top:20px;padding:8px 20px;border-radius:20px;border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;font-size:13px;cursor:pointer;display:none;}
+  .sub{font-size:12px;font-weight:400;color:#d0d0d0;margin-top:8px;min-height:1.4em;}
+  button{margin-top:20px;padding:8px 20px;border-radius:20px;border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;font-size:13px;cursor:pointer;}
   button:active{background:rgba(255,255,255,.12);}
-  .note{font-size:11px;color:#999;margin-top:24px;line-height:1.7;text-align:left;}
+  .note{font-size:12px;color:#b8b8b8;margin-top:24px;line-height:1.7;text-align:left;}
+  #closeBtn{display:none;}
+
+  /* ---- アプリを中に表示する形（スマホで画面を切り替えずにマイクを使うため） ---- */
+  html.m-app,html.m-app body{height:100%;overflow:hidden;}
+  #appFrame{position:fixed;top:0;left:0;width:100%;height:100%;border:0;display:none;background:#20242b;}
+  html.m-app #appFrame{display:block;}
+  html.m-app #relay,html.m-setup #relay{display:none;}
+  #loading{position:fixed;inset:0;display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;font-size:14px;color:#ddd;pointer-events:none;}
+  html.m-app.loading #loading{display:flex;}
+  #banner{position:fixed;left:8px;right:8px;bottom:calc(8px + env(safe-area-inset-bottom));display:none;background:#FFF4DB;color:#3A2300;border:1px solid #E3A542;border-left:5px solid #B35F00;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.6;box-shadow:0 4px 16px rgba(0,0,0,.35);z-index:5;}
+  #banner.show{display:block;}
+  #banner button{margin:8px 8px 0 0;padding:6px 14px;color:#3A2300;border-color:#B35F00;background:#fff;}
+  #setup{display:none;max-width:460px;margin:0 auto;padding:28px 20px;box-sizing:border-box;}
+  html.m-setup #setup{display:block;}
+  #setup h1{text-align:center;}
+  #setup p{font-size:13px;line-height:1.75;color:#e4e4e4;}
+  #setup label{display:block;font-size:13px;font-weight:700;margin:18px 0 6px;color:#f0f0f0;}
+  #appUrl{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:#14171c;color:#fff;font-size:14px;}
+  #openApp{display:block;width:100%;margin-top:14px;padding:11px;border-radius:10px;border:0;background:#d3b47f;color:#231a0c;font-weight:700;font-size:15px;}
+  #setupErr{color:#FFB3B8;font-size:13px;min-height:1.4em;margin-top:10px;}
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="relay">
   <h1>🎤 マイク中継ページ</h1>
   <div class="status s-wait" id="status">起動しています…</div>
   <div class="sub" id="sub"></div>
   <button type="button" id="closeBtn">閉じる</button>
   <p class="note">これはAIキャラアプリのマイクを中継するためだけの小さなページです。録音した音や聞き取った文字は、ここから直接どこか外に送られることはありません。元のアプリの画面（開いた時の親ウィンドウ）にだけ送り返します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
 </div>
+
+<div id="setup">
+  <h1>🎤 アプリをこのページの中で開く準備</h1>
+  <p>このページの中にアプリを表示すると、アプリとマイクが1つの画面にまとまるので、スマホでも画面を切り替えずに🎤やライブが使えます。</p>
+  <p>最初の1回だけ、いつも開いているアプリのアドレスを貼ってください。</p>
+  <label for="appUrl">アプリのアドレス（https://script.google.com/ で始まり、/exec で終わるもの）</label>
+  <input type="url" id="appUrl" placeholder="https://script.google.com/macros/s/……/exec" autocapitalize="off" autocorrect="off" spellcheck="false">
+  <button type="button" id="openApp">このアドレスで開く</button>
+  <div id="setupErr" role="alert"></div>
+  <p class="note">貼ったアドレスは、この端末のブラウザの中にだけ覚えておきます。このページ（GitHub）には書き込まれないので、ほかの人に見られることはありません。また、アプリは持ち主のGoogleアカウントでしか開けないので、ほかの人がこのページを開いてもアプリの中身は見えません。</p>
+  <p class="note">アドレスを入れ直したい時は、このページのアドレスの最後に <b>#setup</b> を付けて開いてください。</p>
+</div>
+
+<iframe id="appFrame" title="アプリ" allow="microphone; camera; autoplay; clipboard-read; clipboard-write; fullscreen; display-capture; encrypted-media; picture-in-picture; web-share; geolocation" allowfullscreen></iframe>
+<div id="loading"><div>アプリを読み込んでいます…</div></div>
+<div id="banner" role="status">
+  <div id="bannerText"></div>
+  <button type="button" id="bannerSetup">アドレスを入れ直す</button><button type="button" id="bannerClose">閉じる</button>
+</div>
+
 <script>
 (function(){
   'use strict';
-  var opener=window.opener;
+  var root=document.documentElement;
   var statusEl=document.getElementById('status');
   var subEl=document.getElementById('sub');
   var closeBtn=document.getElementById('closeBtn');
+  var frame=document.getElementById('appFrame');
   function setStatus(kind,text,sub){
     statusEl.className='status s-'+kind;
     statusEl.textContent=text;
     subEl.textContent=sub||'';
   }
-  closeBtn.style.display='';
   closeBtn.addEventListener('click',function(){window.close();});
 
-  if(!opener){
-    setStatus('err','このページは、AIキャラアプリの方から🎤やライブを押して開いてください。','直接この画面だけを開いても、マイクの中継はできません。');
-    return;
-  }
+  /* このページ自体が、よそのページの枠の中に入れられている時は何もしない（のっとり対策） */
+  if(window.top!==window){setStatus('err','このページは、枠の中では動きません。','');return;}
 
-  function send(msg){try{opener.postMessage(msg,'*');}catch(_){}}
-  var readyTimer=setInterval(function(){send({type:'vb-ready'});},350);
-  send({type:'vb-ready'});
-  setTimeout(function(){clearInterval(readyTimer);},4000);
+  var params;try{params=new URLSearchParams(location.search);}catch(_){params={has:function(){return false;},get:function(){return null;}};}
+  var MIGRATE=params.has('migrate');
+  var opener=window.opener||null;
+  /* 本体アプリの🎤から別窓として開かれた時（窓の名前で見分ける）は、これまで通りの「別窓の中継ページ」。
+     直接開いた時（ホーム画面・ブックマークなど）は、アプリをこのページの中に表示する形。 */
+  var MODE=(opener&&!MIGRATE&&window.name==='reisaVoiceBridge')?'popup':'app';
+
+  /* 相手にしてよいアプリの場所（…googleusercontent.com）。このページの中に自分でアプリを表示した時に覚える。
+     よそのサイトがこのページを開いてマイクを使おうとしても、場所が違うので応じない。 */
+  var PIN_KEY='vbAppOrigin';
+  function pinnedOrigin(){try{return localStorage.getItem(PIN_KEY)||'';}catch(_){return '';}}
+  function setPinnedOrigin(o){try{localStorage.setItem(PIN_KEY,o);}catch(_){}}
+
+  /* ---- どちらの形でも使う、マイクの処理 ---- */
+  var peer=null,peerOrigin='*';
+  function send(msg){if(!peer)return;try{peer.postMessage(msg,peerOrigin);}catch(_){}}
 
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition||null;
   var curRec=null;      /* MediaRecorder */
@@ -85,13 +135,51 @@
     }
     return {fin:fin,itm:itm};
   }
+  /* 途中で固まった前回分を、次の開始時に必ず片づけてから始める（連続で使うと固まる不具合の対策） */
+  function resetRecorder(){
+    if(curRec){var r=curRec;curRec=null;try{r.ondataavailable=null;r.onstop=null;if(r.state!=='inactive')r.stop();}catch(_){}}
+    if(curStream){try{stopTracks(curStream);}catch(_){}curStream=null;}
+  }
+  function resetListener(){
+    if(curSR){var s=curSR;curSR=null;try{s.onresult=s.onerror=s.onend=null;s.abort();}catch(_){}}
+  }
+  /* getUserMediaがBluetoothイヤホン等の切り替えで応答しなくなることがあるため、待ちすぎたら諦めてエラーにする */
+  function withTimeout(p,ms){
+    return new Promise(function(resolve,reject){
+      var done=false;
+      var t=setTimeout(function(){if(!done){done=true;var e=new Error('timeout');e.name='TimeoutError';reject(e);}},ms);
+      p.then(function(v){if(!done){done=true;clearTimeout(t);resolve(v);}},function(e){if(!done){done=true;clearTimeout(t);reject(e);}});
+    });
+  }
+  /* マイクの無いBluetoothイヤホン等がつながっている時、スマホ側がそちらをマイクにしようとして失敗することがあるため、
+     失敗した時だけ「Bluetoothではない方の入力」を名指しで選び直してみる（うまくいく保証はない） */
+  async function pickNonBluetoothId(){
+    try{
+      if(!navigator.mediaDevices.enumerateDevices)return null;
+      var devs=await navigator.mediaDevices.enumerateDevices();
+      var ins=devs.filter(function(d){return d.kind==='audioinput'&&d.deviceId;});
+      var hasBt=ins.some(function(d){return /bluetooth/i.test(d.label||'');});
+      if(!hasBt)return null;
+      var nonBt=ins.filter(function(d){return !/bluetooth/i.test(d.label||'');});
+      return nonBt.length?nonBt[0].deviceId:null;
+    }catch(_){return null;}
+  }
+  async function getMicStream(constraints){
+    try{return await withTimeout(navigator.mediaDevices.getUserMedia(constraints),15000);}
+    catch(e){
+      var altId=await pickNonBluetoothId();
+      if(!altId)throw e;
+      var alt=Object.assign({},constraints&&constraints.audio&&typeof constraints.audio==='object'?constraints.audio:{},{deviceId:{exact:altId}});
+      return await withTimeout(navigator.mediaDevices.getUserMedia({audio:alt}),8000);
+    }
+  }
 
   async function startRecord(){
-    if(curRec)return;
+    resetRecorder();
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-record-error',name:'unsupported',message:'getUserMedia not available'});return;}
     setStatus('busy','マイクを準備しています…','許可を聞かれたら「許可」を選んでください。');
     var stream;
-    try{stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
+    try{stream=await getMicStream({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
     catch(e){send({type:'vb-record-error',name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','許可の設定を確かめてから、元のアプリでもう一度お試しください。');return;}
     curStream=stream;
     var mime=pickMime(),rec;
@@ -127,12 +215,12 @@
 
   function startListen(lang,continuous){
     if(!SR){send({type:'vb-listen-error',code:'not-supported'});return;}
-    if(curSR)return;
+    resetListener();
     var sr;try{sr=new SR();}catch(e){send({type:'vb-listen-error',code:'start'});return;}
     curSR=sr;sr.lang=lang||'ja-JP';sr.continuous=!!continuous;sr.interimResults=true;
     sr.onresult=function(ev){var c=collect(ev);send({type:'vb-listen-result',fin:c.fin,itm:c.itm});};
     sr.onerror=function(ev){var c=ev&&ev.error;send({type:'vb-listen-error',code:c||'error'});};
-    sr.onend=function(){curSR=null;send({type:'vb-listen-end'});setStatus('wait','待機中…（このまま置いておいてください）','');};
+    sr.onend=function(){if(curSR===sr)curSR=null;send({type:'vb-listen-end'});setStatus('wait','待機中…（このまま置いておいてください）','');};
     try{sr.start();}catch(e2){curSR=null;send({type:'vb-listen-error',code:'start'});return;}
     send({type:'vb-listen-started'});
     setStatus('rec','● 聞いています','元のアプリの画面で話してください。');
@@ -142,18 +230,16 @@
 
   async function micCheck(){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-mic-check-result',ok:false,name:'unsupported',message:'getUserMedia not available'});return;}
+    resetRecorder();resetListener();
     setStatus('busy','マイクを確かめています…','');
     var stream;
-    try{stream=await navigator.mediaDevices.getUserMedia({audio:true});}
+    try{stream=await getMicStream({audio:true});}
     catch(e){send({type:'vb-mic-check-result',ok:false,name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','');return;}
     stopTracks(stream);
     send({type:'vb-mic-check-result',ok:true});
     setStatus('ok','マイクが使えます','');
   }
-
-  window.addEventListener('message',function(ev){
-    if(ev.source!==opener)return;
-    var d=ev.data;if(!d||typeof d!=='object')return;
+  function handleCommand(d){
     if(d.type==='vb-start-record')startRecord();
     else if(d.type==='vb-stop-record')stopRecord();
     else if(d.type==='vb-cancel-record')cancelRecord();
@@ -161,10 +247,156 @@
     else if(d.type==='vb-stop-listen')stopListen();
     else if(d.type==='vb-abort-listen')abortListen();
     else if(d.type==='vb-mic-check')micCheck();
+    else if(d.type==='vb-reset'){resetRecorder();resetListener();}
+  }
+
+  /* ================= 別窓の中継ページ（これまで通り） ================= */
+  if(MODE==='popup'){
+    root.classList.add('m-popup');
+    closeBtn.style.display='';
+    var pin=pinnedOrigin();
+    if(!pin){
+      setStatus('err','安全のため、まだマイクを中継できません','このページのアドレスを一度だけ直接開いて（ブックマークやホーム画面から）、アプリのアドレスを設定してください。そのあとは、アプリの🎤やライブから使えます。');
+      return;
+    }
+    /* 送る相手も、覚えているアプリの場所だけ（違う相手には届かない） */
+    peer=opener;peerOrigin=pin;
+    var readyTimer=setInterval(function(){send({type:'vb-ready'});},350);
+    send({type:'vb-ready'});
+    setTimeout(function(){clearInterval(readyTimer);},4000);
+    window.addEventListener('message',function(ev){
+      if(ev.source!==opener||ev.origin!==pin)return;
+      var d=ev.data;if(!d||typeof d!=='object')return;
+      handleCommand(d);
+    });
+    window.addEventListener('beforeunload',function(){send({type:'vb-closing'});});
+    window.addEventListener('pagehide',function(){send({type:'vb-closing'});});
+    setStatus('wait','待機中…（このまま置いておいてください）','');
+    return;
+  }
+
+  /* ================= アプリをこのページの中に表示する形 ================= */
+  var STORE_KEY='vbAppUrl';
+  var appWin=null,appOrigin='';
+  var bannerTimer=0,heard=false;
+  function validAppUrl(u){return /^https:\/\/script\.google\.com\/(?:[^\s?#]*\/)?(?:exec|dev)(?:[?#][^\s]*)?$/.test(String(u||''));}
+  function savedUrl(){try{return localStorage.getItem(STORE_KEY)||'';}catch(_){return '';}}
+  function saveUrl(u){try{localStorage.setItem(STORE_KEY,u);}catch(_){}}
+  /* Apps Scriptのアプリ本体は *.googleusercontent.com で動いている */
+  function isAppsOrigin(o){return /^https:\/\/([a-z0-9-]+\.)+googleusercontent\.com$/.test(String(o||''));}
+  /* このページに置いた枠（アプリ）の中からのメッセージかどうか（親をたどって確かめる） */
+  function fromOurFrame(src){
+    var target=frame.contentWindow;if(!src||!target)return false;
+    var w=src;
+    for(var i=0;i<8&&w;i++){
+      if(w===target)return true;
+      var p;try{p=w.parent;}catch(_){return false;}
+      if(!p||p===w)return false;
+      w=p;
+    }
+    return false;
+  }
+  function stripParams(){
+    try{
+      var u=new URL(location.href);
+      if(!u.searchParams.has('app')&&!u.searchParams.has('migrate'))return;
+      u.searchParams.delete('app');u.searchParams.delete('migrate');
+      history.replaceState(null,'',u.pathname+(u.search?u.search:'')+u.hash);
+    }catch(_){}
+  }
+  function showBanner(text){
+    document.getElementById('bannerText').textContent=text;
+    document.getElementById('banner').classList.add('show');
+  }
+  function hideBanner(){document.getElementById('banner').classList.remove('show');}
+  document.getElementById('bannerClose').addEventListener('click',hideBanner);
+  document.getElementById('bannerSetup').addEventListener('click',function(){hideBanner();showSetup(savedUrl());});
+
+  function showSetup(prefill){
+    document.title='調査ノート（準備）';
+    root.classList.remove('m-app','loading');root.classList.add('m-setup');
+    var inp=document.getElementById('appUrl');inp.value=prefill||'';
+    document.getElementById('setupErr').textContent='';
+  }
+  function startApp(u){
+    document.title='調査ノート';
+    root.classList.remove('m-setup');root.classList.add('m-app','loading');
+    heard=false;appWin=null;appOrigin='';peer=null;
+    frame.addEventListener('load',function onl(){frame.removeEventListener('load',onl);root.classList.remove('loading');});
+    frame.src=u;
+    clearTimeout(bannerTimer);
+    bannerTimer=setTimeout(function(){
+      if(heard)return;
+      showBanner('アプリからの返事がまだありません。アプリが普通に表示されていれば、この案内は閉じて大丈夫です。表示されない時は、①Code.gsへの1行追加と再デプロイ、②アプリのアドレス、③Googleにログインしているか、を確かめてみてください。');
+    },30000);
+  }
+  document.getElementById('openApp').addEventListener('click',function(){
+    var v=String(document.getElementById('appUrl').value||'').trim();
+    if(!validAppUrl(v)){document.getElementById('setupErr').textContent='アドレスの形が違うようです。「https://script.google.com/」で始まり「/exec」で終わるアドレスを貼ってください。';return;}
+    saveUrl(v);
+    try{if(location.hash==='#setup')history.replaceState(null,'',location.pathname+location.search);}catch(_){}
+    startApp(v);
   });
-  window.addEventListener('beforeunload',function(){send({type:'vb-closing'});});
-  window.addEventListener('pagehide',function(){send({type:'vb-closing'});});
-  setStatus('wait','待機中…（このまま置いておいてください）','');
+
+  /* ---- 前のアドレスのアプリから、会話の引っ越しを受け取る（?migrate=1 で開かれた時） ----
+     受け付けるのは、このページの中に表示したアプリと同じ場所（覚えた場所）から来たものだけ。
+     中のアプリ側でも、取り込む前に「取り込む／やめる」を聞く。 */
+  var mig={on:MIGRATE&&!!opener,payload:null,done:false};
+  function migForward(){
+    if(!mig.payload||mig.done||!appWin)return;
+    try{appWin.postMessage({type:'mig-data',payload:mig.payload},appOrigin);}catch(_){}
+  }
+  function migReply(msg){var pin=pinnedOrigin();if(!pin||!opener)return;try{opener.postMessage(msg,pin);}catch(_){}}
+
+  window.addEventListener('message',function(ev){
+    var d=ev.data;if(!d||typeof d!=='object'||typeof d.type!=='string')return;
+    /* 前のアドレスのアプリ（このページを開いた親）からの引っ越し */
+    if(mig.on&&opener&&ev.source===opener){
+      if(mig.done)return;
+      var pin=pinnedOrigin();
+      if(d.type==='mig-offer'){
+        if(!appWin||!pin)return;   /* 中のアプリがまだ表示されていない：表示されてから答える */
+        if(ev.origin!==pin){try{opener.postMessage({type:'mig-reject',reason:'origin'},ev.origin);}catch(_){}return;}
+        migReply({type:'mig-ready'});
+        return;
+      }
+      if(d.type==='mig-data'&&pin&&ev.origin===pin&&appWin){mig.payload=d.payload;migForward();}
+      return;
+    }
+    /* 中のアプリからのメッセージだけを受け付ける */
+    if(!isAppsOrigin(ev.origin)||!fromOurFrame(ev.source))return;
+    if(appWin!==ev.source||appOrigin!==ev.origin){
+      resetRecorder();resetListener();
+      appWin=ev.source;appOrigin=ev.origin;peer=appWin;peerOrigin=appOrigin;
+    }
+    /* 自分で表示したアプリの場所を覚える（別窓の中継・引っ越しは、この場所の相手にだけ応じる） */
+    if(pinnedOrigin()!==appOrigin)setPinnedOrigin(appOrigin);
+    heard=true;clearTimeout(bannerTimer);hideBanner();root.classList.remove('loading');
+    if(d.type==='vb-hello'){
+      /* アプリが起動し直した：前回分のマイクを片づけ、引っ越しの途中ならもう一度渡す */
+      resetRecorder();resetListener();
+      send({type:'vb-wrap-ready',v:1});
+      migForward();
+      return;
+    }
+    if(d.type==='mig-result'){
+      if(mig.on&&!mig.done){
+        mig.done=true;mig.payload=null;
+        migReply({type:'mig-result',ok:!!d.ok,cancelled:!!d.cancelled,added:d.added|0,updated:d.updated|0,kept:d.kept|0,total:d.total|0,error:d.error?String(d.error).slice(0,300):''});
+        /* このタブを読み込み直しても、?migrate が消えているので普通の「アプリを開く形」になる。
+           （親とのつながりは残す：もう一度「送る」を押された時に、同じタブで受け取れるように） */
+        mig.on=false;
+      }
+      stripParams();
+      return;
+    }
+    handleCommand(d);
+  });
+
+  var url=savedUrl();
+  if(location.hash==='#setup'||!validAppUrl(url))showSetup(url);
+  else startApp(url);
+  if(!MIGRATE)stripParams();
 })();
 </script>
 </body>
