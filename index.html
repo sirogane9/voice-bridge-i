@@ -141,14 +141,14 @@
     if(curStream){try{stopTracks(curStream);}catch(_){}curStream=null;}
   }
   function resetListener(){
-    if(curSR){var s=curSR;curSR=null;try{s.onresult=s.onerror=s.onend=null;s.abort();}catch(_){}}
+    if(curSR){var s=curSR;curSR=null;try{s.onresult=s.onerror=s.onend=s.onaudiostart=s.onsoundstart=null;s.abort();}catch(_){}}
   }
   /* getUserMediaがBluetoothイヤホン等の切り替えで応答しなくなることがあるため、待ちすぎたら諦めてエラーにする */
-  function withTimeout(p,ms){
+  function withTimeout(p,ms,onLate){
     return new Promise(function(resolve,reject){
       var done=false;
       var t=setTimeout(function(){if(!done){done=true;var e=new Error('timeout');e.name='TimeoutError';reject(e);}},ms);
-      p.then(function(v){if(!done){done=true;clearTimeout(t);resolve(v);}},function(e){if(!done){done=true;clearTimeout(t);reject(e);}});
+      p.then(function(v){if(!done){done=true;clearTimeout(t);resolve(v);}else if(onLate){try{onLate(v);}catch(_){}}},function(e){if(!done){done=true;clearTimeout(t);reject(e);}});
     });
   }
   /* マイクの無いBluetoothイヤホン等がつながっている時、スマホ側がそちらをマイクにしようとして失敗することがあるため、
@@ -165,17 +165,17 @@
     }catch(_){return null;}
   }
   async function getMicStream(constraints){
-    try{return await withTimeout(navigator.mediaDevices.getUserMedia(constraints),15000);}
+    try{return await withTimeout(navigator.mediaDevices.getUserMedia(constraints),15000,stopTracks);}
     catch(e){
       var altId=await pickNonBluetoothId();
       if(!altId)throw e;
       var alt=Object.assign({},constraints&&constraints.audio&&typeof constraints.audio==='object'?constraints.audio:{},{deviceId:{exact:altId}});
-      return await withTimeout(navigator.mediaDevices.getUserMedia({audio:alt}),8000);
+      return await withTimeout(navigator.mediaDevices.getUserMedia({audio:alt}),8000,stopTracks);
     }
   }
 
   async function startRecord(){
-    resetRecorder();
+    resetRecorder();claimMic();
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-record-error',name:'unsupported',message:'getUserMedia not available'});return;}
     setStatus('busy','マイクを準備しています…','許可を聞かれたら「許可」を選んでください。');
     var stream;
@@ -219,14 +219,17 @@
     var sr;try{sr=new SR();}catch(e){send({type:'vb-listen-error',code:'start'});return;}
     curSR=sr;sr.lang=lang||'ja-JP';sr.continuous=!!continuous;sr.interimResults=true;
     sr.onresult=function(ev){var c=collect(ev);send({type:'vb-listen-result',fin:c.fin,itm:c.itm});};
+    sr.onaudiostart=function(){send({type:'vb-listen-audio'});};
+    sr.onsoundstart=function(){send({type:'vb-listen-sound'});};
     sr.onerror=function(ev){var c=ev&&ev.error;send({type:'vb-listen-error',code:c||'error'});};
     sr.onend=function(){if(curSR===sr)curSR=null;send({type:'vb-listen-end'});setStatus('wait','待機中…（このまま置いておいてください）','');};
+    claimMic();
     try{sr.start();}catch(e2){curSR=null;send({type:'vb-listen-error',code:'start'});return;}
-    send({type:'vb-listen-started'});
+    send({type:'vb-listen-started',v:2});
     setStatus('rec','● 聞いています','元のアプリの画面で話してください。');
   }
   function stopListen(){if(curSR){try{curSR.stop();}catch(_){}}}
-  function abortListen(){if(curSR){var sr=curSR;curSR=null;try{sr.onresult=sr.onerror=sr.onend=null;sr.abort();}catch(_){}}setStatus('wait','待機中…（このまま置いておいてください）','');}
+  function abortListen(){if(curSR){var sr=curSR;curSR=null;try{sr.onresult=sr.onerror=sr.onend=sr.onaudiostart=sr.onsoundstart=null;sr.abort();}catch(_){}}setStatus('wait','待機中…（このまま置いておいてください）','');}
 
   async function micCheck(){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-mic-check-result',ok:false,name:'unsupported',message:'getUserMedia not available'});return;}
@@ -239,6 +242,14 @@
     send({type:'vb-mic-check-result',ok:true});
     setStatus('ok','マイクが使えます','');
   }
+  var TAB_ID=Math.random().toString(36).slice(2),bc=null;
+  try{bc=new BroadcastChannel('vb-mic');}catch(_){bc=null;}
+  function claimMic(){try{if(bc)bc.postMessage({type:'claim',id:TAB_ID});}catch(_){}}
+  if(bc)bc.onmessage=function(ev){
+    var d=ev.data;if(!d||d.type!=='claim'||d.id===TAB_ID)return;
+    if(curSR){resetListener();send({type:'vb-listen-error',code:'taken'});send({type:'vb-listen-end'});setStatus('wait','別のタブでマイクを使い始めたので、こちらは止めました。','');}
+    if(curRec){curRec._cancelled=true;resetRecorder();send({type:'vb-record-error',name:'taken',message:'another tab'});}
+  };
   function handleCommand(d){
     if(d.type==='vb-start-record')startRecord();
     else if(d.type==='vb-stop-record')stopRecord();
