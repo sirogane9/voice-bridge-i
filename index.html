@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>マイク中継ページ</title>
+<!-- v346: 「見ながら話す」用に、カメラ・画面共有の中継を追加。アプリで送信した時だけ1枚撮ってアプリにだけ返す（動画を送り続けない）。共有中の表示と止めるボタン。画面共有は、ブラウザの決まりでこのページで1回押す必要がある時だけ、ボタンを出す。 -->
 <style>
   html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
   .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
@@ -38,20 +39,41 @@
   #appUrl{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:#14171c;color:#fff;font-size:14px;}
   #openApp{display:block;width:100%;margin-top:14px;padding:11px;border-radius:10px;border:0;background:#d3b47f;color:#231a0c;font-weight:700;font-size:15px;}
   #setupErr{color:#FFB3B8;font-size:13px;min-height:1.4em;margin-top:10px;}
+  /* v346: 見ながら話す（カメラ・画面共有） */
+  #lookPill{position:fixed;top:calc(6px + env(safe-area-inset-top));left:6px;z-index:6;display:none;align-items:center;gap:6px;padding:4px 6px 4px 4px;border-radius:16px;background:rgba(40,10,14,.88);border:1px solid #E0626E;color:#FFE3E6;font-size:11px;box-shadow:0 2px 10px rgba(0,0,0,.35);}
+  #lookPill.show{display:flex;}
+  #lookPillPrev{width:44px;height:26px;border-radius:4px;overflow:hidden;background:#000;flex:0 0 auto;}
+  #lookPillPrev video,#lookPrevBox video{width:100%;height:100%;object-fit:contain;display:block;background:#000;}
+  #lookPill button{margin:0;padding:3px 10px;font-size:11px;border-color:#E0626E;color:#FFE3E6;}
+  #lookPill.mini{padding:0;width:16px;height:16px;border-radius:50%;background:#E0626E;border-color:#FFE3E6;cursor:pointer;animation:lkDot 1.6s ease-in-out infinite;}
+  #lookPill.mini #lookPillPrev{width:1px;height:1px;opacity:.01;position:absolute;overflow:hidden;}
+  #lookPill.mini #lookPillText,#lookPill.mini button{display:none;}
+  @keyframes lkDot{0%,100%{box-shadow:0 0 0 0 rgba(224,98,110,.6);}50%{box-shadow:0 0 0 6px rgba(224,98,110,0);}}
+  @media (prefers-reduced-motion:reduce){#lookPill.mini{animation:none;}}
+  #lookClick{position:fixed;inset:0;z-index:7;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,.55);}
+  #lookClick.show{display:flex;}
+  #lookClick .box{max-width:340px;margin:16px;background:#2a2f37;border:1px solid #d3b47f;border-radius:10px;padding:16px;text-align:center;font-size:14px;line-height:1.7;color:#eee;}
+  #lookClick #lookClickGo{display:block;width:100%;margin:12px 0 0;padding:10px;border:0;border-radius:8px;background:#d3b47f;color:#231a0c;font-weight:700;font-size:15px;}
+  #lookClick #lookClickNo{margin-top:8px;}
+  #lookPop{display:none;margin-top:14px;}
+  #lookPop.show{display:block;}
+  #lookPrevBox{width:100%;max-width:300px;height:150px;margin:0 auto;background:#000;border-radius:6px;overflow:hidden;}
+  #lookPop button{margin-top:10px;border-color:#E0626E;}
 </style>
 </head>
 <body>
 <div class="wrap" id="relay">
-  <h1>🎤 マイク中継ページ</h1>
+  <h1>🎤📷 マイク・カメラ中継ページ</h1>
   <div class="status s-wait" id="status">起動しています…</div>
   <div class="sub" id="sub"></div>
+  <div id="lookPop"><div id="lookPrevBox"></div><button type="button" id="lookPopStop">共有を止める</button></div>
   <button type="button" id="closeBtn">閉じる</button>
-  <p class="note">これはAIキャラアプリのマイクを中継するためだけの小さなページです。録音した音や聞き取った文字は、ここから直接どこか外に送られることはありません。元のアプリの画面（開いた時の親ウィンドウ）にだけ送り返します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
+  <p class="note">これはAIキャラアプリのマイクと、「見ながら話す」のカメラ・画面共有を中継するためだけの小さなページです。録音した音・聞き取った文字・撮った画像は、ここから直接どこか外に送られることはありません。元のアプリの画面（開いた時の親ウィンドウ）にだけ送り返します。画像は、アプリで送信した時に1枚だけ撮って渡します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
 </div>
 
 <div id="setup">
   <h1>🎤 アプリをこのページの中で開く準備</h1>
-  <p>このページの中にアプリを表示すると、アプリとマイクが1つの画面にまとまるので、スマホでも画面を切り替えずに🎤やライブが使えます。</p>
+  <p>このページの中にアプリを表示すると、アプリとマイク・カメラが1つの画面にまとまるので、スマホでも画面を切り替えずに🎤・ライブ・見ながら話すが使えます。</p>
   <p>最初の1回だけ、いつも開いているアプリのアドレスを貼ってください。</p>
   <label for="appUrl">アプリのアドレス（https://script.google.com/ で始まり、/exec で終わるもの）</label>
   <input type="url" id="appUrl" placeholder="https://script.google.com/macros/s/……/exec" autocapitalize="off" autocorrect="off" spellcheck="false">
@@ -63,6 +85,8 @@
 
 <iframe id="appFrame" title="アプリ" allow="microphone; camera; autoplay; clipboard-read; clipboard-write; fullscreen; display-capture; encrypted-media; picture-in-picture; web-share; geolocation" allowfullscreen></iframe>
 <div id="loading"><div>アプリを読み込んでいます…</div></div>
+<div id="lookPill" role="status" aria-live="polite" title="見ながら話す：共有中（押すと、止めるボタンが出ます）"><div id="lookPillPrev"></div><span id="lookPillText"></span><button type="button" id="lookPillStop">止める</button></div>
+<div id="lookClick" role="dialog" aria-modal="true" aria-labelledby="lookClickText"><div class="box"><div id="lookClickText"></div><button type="button" id="lookClickGo">共有する画面を選ぶ</button><button type="button" id="lookClickNo">やめる</button></div></div>
 <div id="banner" role="status">
   <div id="bannerText"></div>
   <button type="button" id="bannerSetup">アドレスを入れ直す</button><button type="button" id="bannerClose">閉じる</button>
@@ -250,6 +274,128 @@
     if(curSR){resetListener();send({type:'vb-listen-error',code:'taken'});send({type:'vb-listen-end'});setStatus('wait','別のタブでマイクを使い始めたので、こちらは止めました。','');}
     if(curRec){curRec._cancelled=true;resetRecorder();send({type:'vb-record-error',name:'taken',message:'another tab'});}
   };
+  /* ---- v346: 見ながら話す（カメラ・画面共有）。アプリで送信した時だけ1枚撮って、アプリにだけ返す ---- */
+  var CAPS={look:1,screen:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),camera:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)};
+  var lk={stream:null,video:null,src:'',facing:'',timer:0,previewMax:320,clickReq:null,prevBusy:false,miniT:0};
+  /* アプリの画面にかぶらないよう、少したったら小さな赤い点にたたむ（押すと、もう一度ひらく） */
+  function lkPillMiniLater(ms){clearTimeout(lk.miniT);lk.miniT=setTimeout(function(){if(lk.stream)document.getElementById('lookPill').classList.add('mini');},ms);}
+  document.getElementById('lookPill').addEventListener('click',function(ev){var el=document.getElementById('lookPill');if(el.classList.contains('mini')){ev.preventDefault();el.classList.remove('mini');lkPillMiniLater(6000);}});
+  function named(n,m){var e=new Error(m||n);e.name=n;return e;}
+  function lkVideo(){
+    if(lk.video)return lk.video;
+    var v=document.createElement('video');v.muted=true;v.setAttribute('playsinline','');v.playsInline=true;
+    /* 見えている場所に置く（見えない動画は、ブラウザが止めることがあるため） */
+    document.getElementById(MODE==='popup'?'lookPrevBox':'lookPillPrev').appendChild(v);
+    lk.video=v;return v;
+  }
+  function lkGet(src,facing){
+    var md=navigator.mediaDevices;
+    if(src==='screen')return md.getDisplayMedia({video:{frameRate:{ideal:5,max:10}},audio:false});
+    return md.getUserMedia({video:{facingMode:{ideal:facing==='user'?'user':'environment'},width:{ideal:1920},height:{ideal:1080}},audio:false});
+  }
+  /* 画面共有は「このページで押した直後」しか始められないブラウザがある。その時はボタンを出して押してもらう */
+  function lkNeedsGesture(e){var n=String(e&&e.name||''),m=String(e&&e.message||'');return n==='InvalidStateError'||/gesture|user activation|user-initiated|transient/i.test(m);}
+  async function lookStart(d){
+    var id=String(d.id||'').slice(0,40),src=d.source==='screen'?'screen':'camera',facing=d.facing==='user'?'user':'environment';
+    send({type:'vb-look-ack',id:id});
+    lookStop('restart',true);
+    lk.previewMax=Math.max(160,Math.min(480,Number(d.previewMax)||320));
+    if(src==='screen'?!CAPS.screen:!CAPS.camera){send({type:'vb-look-error',id:id,source:src,name:'NotSupportedError',message:'not supported in this browser'});return;}
+    var st;
+    try{st=await lkGet(src,facing);}
+    catch(e){
+      if(lkNeedsGesture(e)){lkAskClick(id,src,facing);return;}
+      send({type:'vb-look-error',id:id,source:src,name:e&&e.name,message:e&&e.message});lkUi();return;
+    }
+    lkBegin(id,src,facing,st);
+  }
+  function lkAskClick(id,src,facing){
+    lk.clickReq={id:id,src:src,facing:facing};
+    document.getElementById('lookClickText').textContent=src==='screen'?'見ながら話す：下のボタンを押して、共有する画面を選んでください。':'見ながら話す：下のボタンを押すと、カメラが始まります。';
+    document.getElementById('lookClickGo').textContent=src==='screen'?'共有する画面を選ぶ':'カメラを始める';
+    document.getElementById('lookClick').classList.add('show');
+    send({type:'vb-look-need-click',id:id,source:src});
+    if(MODE==='popup'){try{window.focus();}catch(_){}}
+  }
+  document.getElementById('lookClickGo').addEventListener('click',async function(){
+    var r=lk.clickReq;if(!r)return;lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');
+    var st;
+    try{st=await lkGet(r.src,r.facing);}
+    catch(e){send({type:'vb-look-error',id:r.id,source:r.src,name:e&&e.name,message:e&&e.message});lkUi();return;}
+    lkBegin(r.id,r.src,r.facing,st);
+  });
+  document.getElementById('lookClickNo').addEventListener('click',function(){
+    var r=lk.clickReq;lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');
+    if(r)send({type:'vb-look-error',id:r.id,source:r.src,name:'NotAllowedError',message:'cancelled on relay page'});
+  });
+  async function lkBegin(id,src,facing,st){
+    lk.stream=st;lk.src=src;lk.facing=facing;
+    var v=lkVideo();v.srcObject=st;
+    try{await v.play();}catch(_){}
+    st.getVideoTracks().forEach(function(tr){tr.addEventListener('ended',function(){if(lk.stream===st)lookStop('ended');});});
+    var tr0=st.getVideoTracks()[0],set=(tr0&&tr0.getSettings)?tr0.getSettings():{};
+    send({type:'vb-look-started',id:id,source:src,label:String((tr0&&tr0.label)||'').slice(0,120),w:set.width|0,h:set.height|0});
+    clearInterval(lk.timer);
+    lk.timer=setInterval(lkPreviewTick,1000);
+    setTimeout(lkPreviewTick,300);
+    lkUi();
+  }
+  async function lkGrab(maxSide,q){
+    var st=lk.stream;if(!st)throw named('NoStream');
+    var tr=st.getVideoTracks()[0],img=null,w=0,h=0,bm=null;
+    /* 別窓が後ろに回っていても撮れるように、使える時は映像そのものから1枚取る */
+    if(window.ImageCapture&&tr&&tr.readyState==='live'){
+      try{bm=await new ImageCapture(tr).grabFrame();img=bm;w=bm.width;h=bm.height;}catch(_){bm=null;img=null;}
+    }
+    if(!img){
+      var v=lk.video,t0=Date.now();
+      while(v&&!v.videoWidth&&Date.now()-t0<1500)await new Promise(function(r){setTimeout(r,100);});
+      if(!v||!v.videoWidth)throw named('NotReadyError');
+      img=v;w=v.videoWidth;h=v.videoHeight;
+    }
+    var sc=Math.min(1,maxSide/Math.max(w,h)),cv=document.createElement('canvas');
+    cv.width=Math.max(1,Math.round(w*sc));cv.height=Math.max(1,Math.round(h*sc));
+    cv.getContext('2d').drawImage(img,0,0,cv.width,cv.height);
+    if(bm&&bm.close){try{bm.close();}catch(_){}}
+    var u=cv.toDataURL('image/jpeg',q);
+    return {data:u.slice(u.indexOf(',')+1),w:cv.width,h:cv.height};
+  }
+  async function lkPreviewTick(){
+    if(!lk.stream||lk.prevBusy)return;lk.prevBusy=true;
+    try{var r=await lkGrab(lk.previewMax,0.6);if(lk.stream)send({type:'vb-look-preview',data:r.data,w:r.w,h:r.h,at:Date.now()});}catch(_){}
+    finally{lk.prevBusy=false;}
+  }
+  async function lookFrame(d){
+    var id=String(d.id||'').slice(0,40),max=Math.max(320,Math.min(2560,Number(d.maxSide)||1280)),q=Math.max(0.5,Math.min(0.95,Number(d.quality)||0.82));
+    try{var r=await lkGrab(max,q);send({type:'vb-look-image',id:id,data:r.data,media:'image/jpeg',w:r.w,h:r.h,at:Date.now()});}
+    catch(e){send({type:'vb-look-error',id:id,source:lk.src,name:(e&&e.name)||'Error',message:(e&&e.message)||''});}
+  }
+  function lookStop(reason,silent){
+    clearInterval(lk.timer);lk.timer=0;
+    var had=!!lk.stream;
+    if(lk.stream){try{lk.stream.getTracks().forEach(function(t){t.stop();});}catch(_){}}
+    lk.stream=null;
+    if(lk.video){try{lk.video.srcObject=null;}catch(_){}}
+    if(lk.clickReq&&reason!=='restart'){lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');}
+    if(had&&!silent)send({type:'vb-look-ended',reason:reason||'stopped'});
+    lkUi();
+  }
+  function lkUi(){
+    var on=!!lk.stream,name=lk.src==='screen'?'画面':(lk.facing==='user'?'内カメラ':'カメラ');
+    if(MODE==='popup'){
+      document.getElementById('lookPop').classList.toggle('show',on);
+      if(on)setStatus('rec','● '+name+'を共有中','元のアプリで送信した時だけ、1枚撮ってアプリに渡します。止める時は、下のボタンか元のアプリの「止める」を押してください。');
+      else if(/s-rec/.test(statusEl.className)&&!curRec&&!curSR)setStatus('wait','待機中…（このまま置いておいてください）','');
+    }else{
+      var pill=document.getElementById('lookPill');
+      if(on&&!pill.classList.contains('show')){pill.classList.remove('mini');lkPillMiniLater(4000);}
+      pill.classList.toggle('show',on);if(!on){pill.classList.remove('mini');clearTimeout(lk.miniT);}
+      document.getElementById('lookPillText').textContent=on?('● '+name+'を共有中'):'';
+    }
+  }
+  document.getElementById('lookPillStop').addEventListener('click',function(){lookStop('stopped-relay');});
+  document.getElementById('lookPopStop').addEventListener('click',function(){lookStop('stopped-relay');});
+
   function handleCommand(d){
     if(d.type==='vb-start-record')startRecord();
     else if(d.type==='vb-stop-record')stopRecord();
@@ -259,6 +405,9 @@
     else if(d.type==='vb-abort-listen')abortListen();
     else if(d.type==='vb-mic-check')micCheck();
     else if(d.type==='vb-reset'){resetRecorder();resetListener();}
+    else if(d.type==='vb-look-start')lookStart(d);
+    else if(d.type==='vb-look-stop')lookStop('stopped',true);
+    else if(d.type==='vb-look-frame')lookFrame(d);
   }
 
   /* ================= 別窓の中継ページ（これまで通り） ================= */
@@ -272,8 +421,8 @@
     }
     /* 送る相手も、覚えているアプリの場所だけ（違う相手には届かない） */
     peer=opener;peerOrigin=pin;
-    var readyTimer=setInterval(function(){send({type:'vb-ready'});},350);
-    send({type:'vb-ready'});
+    var readyTimer=setInterval(function(){send({type:'vb-ready',v:2,caps:CAPS});},350);
+    send({type:'vb-ready',v:2,caps:CAPS});
     setTimeout(function(){clearInterval(readyTimer);},4000);
     window.addEventListener('message',function(ev){
       if(ev.source!==opener||ev.origin!==pin)return;
@@ -377,7 +526,7 @@
     /* 中のアプリからのメッセージだけを受け付ける */
     if(!isAppsOrigin(ev.origin)||!fromOurFrame(ev.source))return;
     if(appWin!==ev.source||appOrigin!==ev.origin){
-      resetRecorder();resetListener();
+      resetRecorder();resetListener();lookStop('app-changed',true);
       appWin=ev.source;appOrigin=ev.origin;peer=appWin;peerOrigin=appOrigin;
     }
     /* 自分で表示したアプリの場所を覚える（別窓の中継・引っ越しは、この場所の相手にだけ応じる） */
@@ -385,8 +534,8 @@
     heard=true;clearTimeout(bannerTimer);hideBanner();root.classList.remove('loading');
     if(d.type==='vb-hello'){
       /* アプリが起動し直した：前回分のマイクを片づけ、引っ越しの途中ならもう一度渡す */
-      resetRecorder();resetListener();
-      send({type:'vb-wrap-ready',v:1});
+      resetRecorder();resetListener();lookStop('app-restart',true);h
+      send({type:'vb-wrap-ready',v:2,caps:CAPS});
       migForward();
       return;
     }
