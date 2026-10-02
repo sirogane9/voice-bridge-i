@@ -3,9 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>マイク中継ページ</title>
-<!-- v350: 見ながら話すの確認用の映像が、スマホで最初の1枚から動かないことがあった。アプリの中に表示する形では、動いている映像（video）から先に取り出し、取り出しが2秒で返らない時は別の方法に切り替える。前の取り出しが固まっても4秒で見切る。小さな赤い点にたたんでも、映像は小さく見えるままにする（見えない映像は、ブラウザが更新を止めることがあるため）。確認用の映像は0.7秒ごと。 -->
-<!-- v346: 「見ながら話す」用に、カメラ・画面共有の中継を追加。アプリで送信した時だけ1枚撮ってアプリにだけ返す（動画を送り続けない）。共有中の表示と止めるボタン。画面共有は、ブラウザの決まりでこのページで1回押す必要がある時だけ、ボタンを出す。 -->
+<title>マイク・カメラ中継ページ v353</title>
+<!-- v352.1: 発話開始・終了と認識セッションIDを中継。旧会話引っ越しを削除。 -->
 <style>
   html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
   .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
@@ -60,7 +59,241 @@
   #lookPop.show{display:block;}
   #lookPrevBox{width:100%;max-width:300px;height:150px;margin:0 auto;background:#000;border-radius:6px;overflow:hidden;}
   #lookPop button{margin-top:10px;border-color:#E0626E;}
+  #glRelayGate{display:none;position:fixed;inset:0;z-index:9;align-items:center;justify-content:center;background:rgba(0,0,0,.65);}
+  #glRelayGate.show{display:flex;}
+  #glRelayGate .box{max-width:360px;margin:16px;padding:20px;border-radius:12px;background:#242d34;border:1px solid #73c1ba;text-align:center;line-height:1.7;}
+  #glRelayGo{display:block;width:100%;min-height:48px;background:#9bd9ca;color:#142721;font-weight:bold;}
 </style>
+<script>
+/* v353: Gemini Live transport. No permanent keys, recordings or image history. */
+(function(global){
+  'use strict';
+  var WS_URL='wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=';
+  function clamp(n,a,b){return Math.max(a,Math.min(b,Number(n)||a));}
+  function tracksOff(s){try{if(s)s.getTracks().forEach(function(t){t.stop();});}catch(_){}}
+  function safeError(e){
+    var s=String(e&&e.message||e||'接続できませんでした。');
+    return s.replace(/(?:auth_tokens\/|AIza|Bearer |access_token[=:])[^\s"&]+/gi,'[非表示]').slice(0,220);
+  }
+  function bytes64(bytes){var s='';for(var i=0;i<bytes.length;i+=8192)s+=String.fromCharCode.apply(null,bytes.subarray(i,i+8192));return btoa(s);}
+  function unbase64(s){var raw=atob(s),a=new Uint8Array(raw.length);for(var i=0;i<raw.length;i++)a[i]=raw.charCodeAt(i);return a;}
+  // Streaming linear resampling retains the boundary sample between worklet blocks.
+  function Resampler(rate){this.ratio=rate/16000;this.tail=new Float32Array(0);this.pos=0;}
+  Resampler.prototype.push=function(samples){
+    var a=new Float32Array(this.tail.length+samples.length);a.set(this.tail);a.set(samples,this.tail.length);
+    var out=[],p=this.pos;
+    while(p+1<a.length){var i=Math.floor(p),f=p-i;out.push(a[i]+(a[i+1]-a[i])*f);p+=this.ratio;}
+    var used=Math.min(a.length,Math.floor(p));this.tail=a.slice(used);this.pos=p-used;return out;
+  };
+  function Live(options){
+    this.options=options||{};this.active=false;this.epoch=0;this.socketEpoch=0;this.socket=null;
+    this.ctx=null;this.stream=null;this.sources=[];this.playUntil=0;this.status='off';this.frameBusy=false;
+    this.videoPaused=false;this.frozen=false;this.fixedFrame=null;this.muted=false;this.externalSpeaking=false;
+    this.userText='';this.modelText='';this.interrupted=false;this.turnNo=0;this.recent=[];
+    this.resumeHandle='';this.credential=null;this.retryCount=0;this.failures=0;this.lastFrameAt=0;
+    this.metrics={version:353,startedAt:null,endedAt:null,frames:0,audioInputSeconds:0,audioOutputSeconds:0,reconnects:0,turns:0,usageReports:[],latenciesMs:[]};
+  }
+  Live.prototype.emit=function(type,data){try{this.options.onEvent(Object.assign({type:type},data||{}));}catch(_){}};
+  Live.prototype.state=function(s,message){this.status=s;this.emit('state',{state:s,message:message||''});};
+  Live.prototype.prime=function(){
+    if(!this.ctx||this.ctx.state==='closed'){
+      var AC=global.AudioContext||global.webkitAudioContext;if(!AC)throw Error('このブラウザではライブ音声を使えません。');
+      this.ctx=new AC();
+    }
+    return this.ctx.resume();
+  };
+  Live.prototype.start=async function(config){
+    if(this.active)return;this.active=true;this.config=config||{};var epoch=++this.epoch,self=this;
+    this.metrics.startedAt=new Date().toISOString();this.started=Date.now();this.deadline=this.started+clamp(this.config.minutes||10,1,20)*60000;
+    this.state('preparing','マイクを準備しています…');
+    this.limitTimer=setTimeout(function(){self.stop('設定した会話時間になったため終了しました。');},this.deadline-Date.now());
+    try{
+      await this.prime();if(!this.active||epoch!==this.epoch)return;
+      var acquire=this.options.getMic||function(){return navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});};
+      var stream=await new Promise(function(resolve,reject){
+        var done=false,t=setTimeout(function(){done=true;reject(Error('マイクの許可を確認できませんでした。もう一度開始してください。'));},20000);
+        Promise.resolve().then(acquire).then(function(s){if(done||!self.active||epoch!==self.epoch){tracksOff(s);if(!done){clearTimeout(t);done=true;resolve(null);}return;}done=true;clearTimeout(t);resolve(s);},function(e){if(!done){done=true;clearTimeout(t);reject(e);}});
+      });
+      if(!stream||!this.active||epoch!==this.epoch){tracksOff(stream);return;}
+      this.stream=stream;stream.getAudioTracks().forEach(function(t){t.onended=function(){if(self.active)self.stop('マイクとの接続が終了しました。');};});
+      await this.installCapture(epoch);if(!this.active||epoch!==this.epoch)return;
+      this.tickTimer=setInterval(function(){self.tick();},250);
+      await this.connect(false);
+    }catch(e){if(this.active&&epoch===this.epoch)this.stop(safeError(e));}
+  };
+  Live.prototype.installCapture=async function(epoch){
+    var self=this,ctx=this.ctx;this.resampler=new Resampler(ctx.sampleRate);this.pcm=[];
+    var node=null,url=null;
+    if(ctx.audioWorklet&&global.AudioWorkletNode){
+      try{
+        var src='class LiveCapture353 extends AudioWorkletProcessor { process(inputs, outputs) { const a=inputs[0]&&inputs[0][0]; if(a)this.port.postMessage(a.slice(0)); return true; } } registerProcessor("live-capture-353",LiveCapture353);';
+        url=URL.createObjectURL(new Blob([src],{type:'text/javascript'}));await ctx.audioWorklet.addModule(url);
+        if(!this.active||epoch!==this.epoch)return;
+        node=new AudioWorkletNode(ctx,'live-capture-353');node.port.onmessage=function(e){self.capture(e.data);};
+      }catch(_){node=null;}finally{if(url)URL.revokeObjectURL(url);}
+    }
+    if(!this.active||epoch!==this.epoch){if(node)node.disconnect();return;}
+    if(!node){node=ctx.createScriptProcessor(2048,1,1);node.onaudioprocess=function(e){self.capture(e.inputBuffer.getChannelData(0));};}
+    this.captureNode=node;this.inputNode=ctx.createMediaStreamSource(this.stream);this.silentGain=ctx.createGain();this.silentGain.gain.value=0;
+    this.inputNode.connect(node);node.connect(this.silentGain);this.silentGain.connect(ctx.destination);
+  };
+  Live.prototype.capture=function(samples){
+    if(!this.active)return;
+    var sum=0;for(var i=0;i<samples.length;i++)sum+=samples[i]*samples[i];var level=Math.sqrt(sum/Math.max(1,samples.length));
+    if(Date.now()-(this.levelAt||0)>100){this.levelAt=Date.now();this.emit('input-level',{level:Math.min(1,level*12)});}
+    if(this.status!=='ready'||this.muted||this.externalSpeaking){this.pcm=[];this.resampler=new Resampler(this.ctx.sampleRate);return;}
+    if(level>0.018)this.lastSpeechAt=Date.now();
+    var out=this.resampler.push(samples);for(var j=0;j<out.length;j++)this.pcm.push(out[j]);
+    while(this.pcm.length>=1600){
+      var a=this.pcm.splice(0,1600),bytes=new Uint8Array(3200),view=new DataView(bytes.buffer);
+      for(var k=0;k<a.length;k++){var n=Math.max(-1,Math.min(1,a[k]));view.setInt16(k*2,Math.round(n*(n<0?32768:32767)),true);}
+      if(this.send({realtimeInput:{audio:{mimeType:'audio/pcm;rate=16000',data:bytes64(bytes)}}}))this.metrics.audioInputSeconds+=0.1;
+    }
+  };
+  Live.prototype.setup=function(resume){
+    var c=this.config,prompt=String(c.prompt||'').slice(0,14000);
+    if(!resume&&this.recent.length)prompt+='\n【直前の会話。接続復旧の参考です】\n'+this.recent.slice(-8).join('\n').slice(-6000);
+    return {model:'models/'+c.model,generationConfig:{responseModalities:['AUDIO'],maxOutputTokens:2048,speechConfig:{voiceConfig:{prebuiltVoiceConfig:{voiceName:c.voice||'Kore'}}}},
+      systemInstruction:{parts:[{text:prompt}]},inputAudioTranscription:{},outputAudioTranscription:{},
+      realtimeInputConfig:{automaticActivityDetection:{disabled:false,startOfSpeechSensitivity:'START_SENSITIVITY_LOW',endOfSpeechSensitivity:'END_SENSITIVITY_LOW',prefixPaddingMs:200,silenceDurationMs:clamp(c.silenceMs||2000,800,6000)},activityHandling:'START_OF_ACTIVITY_INTERRUPTS',turnCoverage:'TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO'},
+      sessionResumption:resume?{handle:this.resumeHandle}:{},contextWindowCompression:{slidingWindow:{}}};
+  };
+  Live.prototype.connect=async function(resume){
+    if(!this.active)return;var self=this,epoch=this.epoch,seq=++this.socketEpoch;
+    this.state(this.metrics.reconnects?'reconnecting':'connecting',this.metrics.reconnects?'ライブ接続を戻しています…':'Gemini Liveへ接続しています…');
+    try{
+      if(!resume||!this.credential||Date.now()>Date.parse(this.credential.expireTime)-45000){
+        this.credential=await this.options.getToken({model:this.config.model,minutes:Math.max(1,Math.ceil((this.deadline-Date.now())/60000))});
+      }
+      if(!this.active||epoch!==this.epoch||seq!==this.socketEpoch)return;
+      if(!this.credential||!/^auth_tokens\//.test(this.credential.token||''))throw Error('ライブ用の接続トークンを取得できませんでした。');
+      var ws=new WebSocket(WS_URL+encodeURIComponent(this.credential.token));this.socket=ws;this.resuming=!!resume;
+      this.connectTimer=setTimeout(function(){if(self.socket===ws&&self.status!=='ready')self.disconnected(ws,1006,'接続が時間切れになりました。');},20000);
+      ws.onopen=function(){if(!self.valid(ws,epoch,seq))return;ws.send(JSON.stringify({setup:self.setup(resume)}));};
+      var incoming=Promise.resolve();
+      ws.onmessage=function(ev){incoming=incoming.then(async function(){if(!self.valid(ws,epoch,seq))return;var raw=ev.data;if(raw&&typeof raw.text==='function')raw=await raw.text();if(!self.valid(ws,epoch,seq))return;self.message(typeof raw==='string'?JSON.parse(raw):raw);}).catch(function(){if(self.valid(ws,epoch,seq))self.stop('ライブの受信内容を処理できませんでした。');});};
+      ws.onclose=function(ev){if(self.valid(ws,epoch,seq))self.disconnected(ws,ev.code,'接続が切れました。');};
+      ws.onerror=function(){if(self.valid(ws,epoch,seq))self.emit('notice',{message:'通信を確認しています…'});};
+    }catch(e){if(this.active&&epoch===this.epoch&&seq===this.socketEpoch)this.stop(safeError(e));}
+  };
+  Live.prototype.valid=function(ws,epoch,seq){return this.active&&this.socket===ws&&this.epoch===epoch&&this.socketEpoch===seq;};
+  Live.prototype.send=function(obj){
+    var ws=this.socket;if(!this.active||!ws||ws.readyState!==1||this.status!=='ready')return false;
+    if(ws.bufferedAmount>262144){if(!this.congestedAt)this.congestedAt=Date.now();if(Date.now()-this.congestedAt>2000)this.disconnected(ws,1006,'通信が追いつかないため接続を戻します。');return false;}
+    this.congestedAt=0;try{ws.send(JSON.stringify(obj));return true;}catch(_){this.disconnected(ws,1006,'送信に失敗しました。');return false;}
+  };
+  Live.prototype.message=function(d){
+    if(!d||typeof d!=='object')return;
+    if(d.error){this.stop('Live API: '+safeError(d.error));return;}
+    if(d.setupComplete){clearTimeout(this.connectTimer);this.readyAt=Date.now();this.failures=0;this.retryCount=0;this.state('ready','ライブ会話中');this.frame(true);}
+    if(d.sessionResumptionUpdate){var u=d.sessionResumptionUpdate;this.resumeHandle=u.resumable&&u.newHandle?String(u.newHandle):'';}
+    if(d.usageMetadata){this.metrics.usageReports.push({at:new Date().toISOString(),connection:this.metrics.reconnects,turn:this.turnNo,usage:d.usageMetadata});if(this.metrics.usageReports.length>500)this.metrics.usageReports.shift();this.emit('usage',{metrics:this.summary()});}
+    if(d.goAway){var self=this,ms=Math.max(500,parseFloat(d.goAway.timeLeft||'2s')*1000-1000);clearTimeout(this.goAwayTimer);this.goAwayTimer=setTimeout(function(){if(self.socket)self.disconnected(self.socket,1006,'接続を更新します。');},Math.min(ms,15000));}
+    var s=d.serverContent;if(!s)return;
+    if(s.interrupted){this.interrupted=true;this.clearPlayback();this.emit('interrupted');}
+    if(s.inputTranscription&&s.inputTranscription.text){this.userText+=s.inputTranscription.text;this.emit('transcript',{who:'user',text:this.userText,turnId:this.turnNo+1});}
+    if(s.outputTranscription&&s.outputTranscription.text){this.modelText+=s.outputTranscription.text;this.emit('transcript',{who:'assistant',text:this.modelText,turnId:this.turnNo+1});}
+    var parts=s.modelTurn&&s.modelTurn.parts||[];
+    for(var i=0;i<parts.length;i++){
+      var p=parts[i],data=p.inlineData||p.inline_data;
+      if(data&&data.data&&/^audio\/pcm/.test(data.mimeType||data.mime_type||'')){
+        this.generating=true;
+        if(!this.firstAudio){this.firstAudio=Date.now();if(this.lastSpeechAt)this.metrics.latenciesMs.push(Math.max(0,this.firstAudio-this.lastSpeechAt));}
+        this.play(data.data,data.mimeType||data.mime_type);
+      }
+    }
+    if(s.turnComplete)this.finishTurn(false);
+  };
+  Live.prototype.play=function(data,mime){
+    var bytes=unbase64(data);if(bytes.length%2)throw Error('Invalid PCM');var rate=Number((String(mime).match(/rate=(\d+)/)||[])[1])||24000;
+    this.metrics.audioOutputSeconds+=bytes.length/2/rate;
+    if(this.config.outputMode==='character'||this.suppressAudio)return;
+    var ctx=this.ctx;if(!ctx||ctx.state==='closed')return;
+    if(ctx.state!=='running'){this.stop('音声再生が停止しました。もう一度「ライブ開始」を押してください。');return;}
+    if(this.playUntil-ctx.currentTime>40){this.stop('音声の再生が追いつきませんでした。');return;}
+    var buffer=ctx.createBuffer(1,bytes.length/2,rate),arr=buffer.getChannelData(0),view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),sum=0;
+    for(var i=0;i<arr.length;i++){arr[i]=view.getInt16(i*2,true)/32768;sum+=arr[i]*arr[i];}
+    var source=ctx.createBufferSource();source.buffer=buffer;source.connect(ctx.destination);
+    var self=this,at=Math.max(ctx.currentTime+0.025,this.playUntil||0);this.playUntil=at+buffer.duration;
+    this.sources.push(source);this.emit('speaking',{on:true,level:Math.min(1,Math.sqrt(sum/Math.max(1,arr.length))*8)});
+    source.onended=function(){var i=self.sources.indexOf(source);if(i>=0)self.sources.splice(i,1);try{source.disconnect();}catch(_){}if(!self.sources.length)self.emit('speaking',{on:false,level:0});};
+    source.start(at);
+  };
+  Live.prototype.clearPlayback=function(){
+    this.sources.splice(0).forEach(function(s){s.onended=null;try{s.stop();s.disconnect();}catch(_){}});this.playUntil=0;this.emit('speaking',{on:false,level:0});
+  };
+  Live.prototype.interruptPlayback=function(){this.suppressAudio=!!this.generating;this.clearPlayback();};
+  Live.prototype.finishTurn=function(partial){
+    this.generating=false;this.suppressAudio=false;
+    var u=this.userText.trim(),a=this.modelText.trim();if(!u&&!a)return;
+    var ev={id:++this.turnNo,user:u,assistant:a,partial:!!partial||this.interrupted};
+    this.metrics.turns++;if(u)this.recent.push('利用者: '+u);if(a)this.recent.push('AI'+(ev.partial?'（途中まで）':'')+': '+a);this.recent=this.recent.slice(-8);
+    this.userText='';this.modelText='';this.interrupted=false;this.firstAudio=0;this.emit('turn',ev);this.emit('usage',{metrics:this.summary()});
+  };
+  Live.prototype.frame=async function(force){
+    if(!this.active||this.status!=='ready'||this.videoPaused||this.freezing||this.frameBusy)return;
+    var now=Date.now();if(now-this.lastFrameAt<1000||now-(this.lastAttemptAt||0)<1000)return;
+    if(!force&&now-this.lastFrameAt<(this.config.frameMs||2000))return;
+    var epoch=this.epoch,seq=this.socketEpoch,visual=this.visualEpoch||0;this.frameBusy=true;this.lastAttemptAt=now;
+    try{
+      var f=this.frozen&&this.fixedFrame?this.fixedFrame:await this.options.getFrame();
+      if(!this.active||this.epoch!==epoch||this.socketEpoch!==seq||this.videoPaused||visual!==(this.visualEpoch||0))return;
+      if(!f||!f.data)throw Error('カメラ画像を取得できません。');
+      if(this.frozen&&!this.fixedFrame)this.fixedFrame=f;
+      if(this.send({realtimeInput:{video:{mimeType:f.media||'image/jpeg',data:f.data}}})){
+        this.lastFrameAt=Date.now();this.metrics.frames++;this.failures=0;this.emit('frame',{at:this.lastFrameAt,capturedAt:f.at||this.lastFrameAt,frozen:this.frozen});
+      }
+    }catch(e){if(this.active&&epoch===this.epoch&&++this.failures>=5)this.stop('カメラ画像が届かないためライブを終了しました。');}
+    finally{if(epoch===this.epoch)this.frameBusy=false;}
+  };
+  Live.prototype.tick=function(){
+    if(!this.active)return;if(Date.now()>=this.deadline){this.stop('設定した会話時間になったため終了しました。');return;}
+    this.frame(false);if(Date.now()-(this.metricAt||0)>1000){this.metricAt=Date.now();this.emit('usage',{metrics:this.summary()});}
+  };
+  Live.prototype.setMuted=function(on){this.muted=!!on;this.pcm=[];if(on)this.send({realtimeInput:{audioStreamEnd:true}});this.emit('controls',{muted:this.muted,paused:this.videoPaused,frozen:this.frozen});};
+  Live.prototype.setExternalSpeaking=function(on){if(this.externalSpeaking===!!on)return;this.externalSpeaking=!!on;this.pcm=[];if(on)this.send({realtimeInput:{audioStreamEnd:true}});};
+  Live.prototype.pauseVideo=function(on){this.visualEpoch=(this.visualEpoch||0)+1;this.videoPaused=!!on;this.freezing=false;this.emit('controls',{muted:this.muted,paused:this.videoPaused,frozen:this.frozen,freezing:false});};
+  Live.prototype.freeze=async function(on){
+    var visual=this.visualEpoch=(this.visualEpoch||0)+1,epoch=this.epoch;this.fixedFrame=null;this.frozen=false;this.freezing=!!on;
+    this.emit('fixed-frame',{data:null});this.emit('controls',{muted:this.muted,paused:this.videoPaused,frozen:false,freezing:this.freezing});if(!on)return;
+    try{var f=await this.options.getFrame();if(!this.active||epoch!==this.epoch||visual!==this.visualEpoch)return;if(!f||!f.data)throw Error('画像を取得できません。');this.fixedFrame={data:String(f.data),media:f.media||'image/jpeg',at:f.at||Date.now()};this.frozen=true;this.emit('fixed-frame',this.fixedFrame);}
+    catch(_){if(this.active&&epoch===this.epoch)this.emit('notice',{message:'画像を固定できませんでした。もう一度撮ってください。'});}
+    finally{if(epoch===this.epoch&&visual===this.visualEpoch){this.freezing=false;this.emit('controls',{muted:this.muted,paused:this.videoPaused,frozen:this.frozen,freezing:false});}}
+  };
+  Live.prototype.text=function(text){
+    text=String(text||'').trim().slice(0,8000);if(!text)return false;
+    if(this.generating||this.modelText||this.userText){this.emit('notice',{message:'今の発話・返事が終わってから文字を送ってください。入力した文章は残しています。'});return false;}
+    // clientContent is used for a complete typed question, not for periodic frame updates.
+    if(!this.send({clientContent:{turns:[{role:'user',parts:[{text:text}]}],turnComplete:true}}))return false;
+    this.clearPlayback();this.userText+=text;this.lastSpeechAt=Date.now();this.emit('transcript',{who:'user',text:this.userText,turnId:this.turnNo+1});this.emit('text-sent',{text:text});return true;
+  };
+  Live.prototype.disconnected=function(ws,code,message){
+    if(!this.active||this.socket!==ws)return;this.socket=null;++this.socketEpoch;clearTimeout(this.connectTimer);clearTimeout(this.goAwayTimer);
+    ws.onopen=ws.onmessage=ws.onerror=ws.onclose=null;try{ws.close();}catch(_){}
+    this.clearPlayback();this.pcm=[];this.finishTurn(true);
+    if(code===1008||code===1007||code===1003){
+      if(this.resuming&&!this.resumeFallback){this.resumeFallback=true;this.resumeHandle='';this.credential=null;}
+      else{this.stop('Live APIが接続を受け付けませんでした。Geminiのキー・利用可能モデル・中継ページの版を確認してください。');return;}
+    }
+    if(++this.retryCount>3){this.stop('再接続できませんでした。回線を確認して再開してください。');return;}
+    this.metrics.reconnects++;this.state('reconnecting',message);var self=this;
+    this.retryTimer=setTimeout(function(){if(self.active)self.connect(!!self.resumeHandle);},Math.min(4000,500*Math.pow(2,this.retryCount-1)));
+  };
+  Live.prototype.summary=function(){return {version:353,startedAt:this.metrics.startedAt,endedAt:this.metrics.endedAt,seconds:this.started?Math.round((Date.now()-this.started)/1000):0,frames:this.metrics.frames,audioInputSeconds:Math.round(this.metrics.audioInputSeconds*10)/10,audioOutputSeconds:Math.round(this.metrics.audioOutputSeconds*10)/10,reconnects:this.metrics.reconnects,turns:this.metrics.turns,lastUsage:this.metrics.usageReports.length?this.metrics.usageReports[this.metrics.usageReports.length-1].usage:null};};
+  Live.prototype.stop=function(reason){
+    if(!this.active&&this.status==='off'&&!this.ctx)return;this.finishTurn(true);this.active=false;++this.epoch;++this.socketEpoch;
+    ['connectTimer','goAwayTimer','retryTimer','limitTimer','tickTimer'].forEach(function(k){clearTimeout(this[k]);clearInterval(this[k]);this[k]=0;},this);
+    var ws=this.socket;this.socket=null;if(ws){ws.onopen=ws.onmessage=ws.onerror=ws.onclose=null;try{ws.close(1000);}catch(_){}}
+    this.clearPlayback();if(this.captureNode){if(this.captureNode.port)this.captureNode.port.onmessage=null;this.captureNode.onaudioprocess=null;}
+    ['captureNode','inputNode','silentGain'].forEach(function(k){try{if(this[k])this[k].disconnect();}catch(_){}this[k]=null;},this);
+    tracksOff(this.stream);this.stream=null;var ctx=this.ctx;this.ctx=null;try{if(ctx)ctx.close().catch(function(){});}catch(_){}
+    this.pcm=[];this.fixedFrame=null;this.credential=null;this.resumeHandle='';this.metrics.endedAt=new Date().toISOString();this.status='off';
+    this.emit('stopped',{message:reason||'ライブ会話を終了しました。',metrics:this.summary(),usageReports:this.metrics.usageReports,latenciesMs:this.metrics.latenciesMs});
+  };
+  Live.Resampler=Resampler;Live.safeError=safeError;global.GeminiCameraLive=Live;
+})(window);
+
+</script>
 </head>
 <body>
 <div class="wrap" id="relay">
@@ -69,7 +302,7 @@
   <div class="sub" id="sub"></div>
   <div id="lookPop"><div id="lookPrevBox"></div><button type="button" id="lookPopStop">共有を止める</button></div>
   <button type="button" id="closeBtn">閉じる</button>
-  <p class="note">これはAIキャラアプリのマイクと、「見ながら話す」のカメラ・画面共有を中継するためだけの小さなページです。録音した音・聞き取った文字・撮った画像は、ここから直接どこか外に送られることはありません。元のアプリの画面（開いた時の親ウィンドウ）にだけ送り返します。画像は、アプリで送信した時に1枚だけ撮って渡します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
+  <p class="note">これはAIキャラアプリのマイクと、「見ながら話す」のカメラ・画面共有を中継するためだけの小さなページです。このページの処理は、録音した音・聞き取った文字・画像を接続した元のアプリへ渡します。ブラウザの音声認識では、ブラウザ提供元のサービスが音声を処理する場合があります。共有中のプレビュー画像は元のアプリへ定期的に渡し、AI用の画像はアプリで送信した時に1枚撮ります。通常の画像添付は元のアプリが送信します。Gemini Liveを開始した場合は、このページから音声と画像を直接Geminiへ送信します。使い終わったら、このタブ／ウィンドウは閉じてしまって大丈夫です。次に🎤やライブを押すと、また自動で開きます。</p>
 </div>
 
 <div id="setup">
@@ -88,6 +321,7 @@
 <div id="loading"><div>アプリを読み込んでいます…</div></div>
 <div id="lookPill" role="status" aria-live="polite" title="見ながら話す：共有中（押すと、止めるボタンが出ます）"><div id="lookPillPrev"></div><span id="lookPillText"></span><button type="button" id="lookPillStop">止める</button></div>
 <div id="lookClick" role="dialog" aria-modal="true" aria-labelledby="lookClickText"><div class="box"><div id="lookClickText"></div><button type="button" id="lookClickGo">共有する画面を選ぶ</button><button type="button" id="lookClickNo">やめる</button></div></div>
+<div id="glRelayGate" role="dialog" aria-modal="true" aria-labelledby="glRelayTitle"><div class="box"><div id="glRelayTitle">カメラとマイクでGeminiと会話します</div><p>音声の再生を有効にするため、このボタンを押してください。</p><button id="glRelayGo" type="button">カメラとマイクで会話を始める</button><button id="glRelayCancel" type="button">やめる</button></div></div>
 <div id="banner" role="status">
   <div id="bannerText"></div>
   <button type="button" id="bannerSetup">アドレスを入れ直す</button><button type="button" id="bannerClose">閉じる</button>
@@ -112,11 +346,10 @@
   if(window.top!==window){setStatus('err','このページは、枠の中では動きません。','');return;}
 
   var params;try{params=new URLSearchParams(location.search);}catch(_){params={has:function(){return false;},get:function(){return null;}};}
-  var MIGRATE=params.has('migrate');
   var opener=window.opener||null;
   /* 本体アプリの🎤から別窓として開かれた時（窓の名前で見分ける）は、これまで通りの「別窓の中継ページ」。
      直接開いた時（ホーム画面・ブックマークなど）は、アプリをこのページの中に表示する形。 */
-  var MODE=(opener&&!MIGRATE&&window.name==='reisaVoiceBridge')?'popup':'app';
+  var MODE=(opener&&window.name==='reisaVoiceBridge')?'popup':'app';
 
   /* 相手にしてよいアプリの場所（…googleusercontent.com）。このページの中に自分でアプリを表示した時に覚える。
      よそのサイトがこのページを開いてマイクを使おうとしても、場所が違うので応じない。 */
@@ -129,6 +362,7 @@
   function send(msg){if(!peer)return;try{peer.postMessage(msg,peerOrigin);}catch(_){}}
 
   var SR=window.SpeechRecognition||window.webkitSpeechRecognition||null;
+  var recordingGeneration=0;
   var curRec=null;      /* MediaRecorder */
   var curStream=null;
   var curSR=null;       /* SpeechRecognition */
@@ -162,11 +396,12 @@
   }
   /* 途中で固まった前回分を、次の開始時に必ず片づけてから始める（連続で使うと固まる不具合の対策） */
   function resetRecorder(){
+    recordingGeneration++;
     if(curRec){var r=curRec;curRec=null;try{r.ondataavailable=null;r.onstop=null;if(r.state!=='inactive')r.stop();}catch(_){}}
     if(curStream){try{stopTracks(curStream);}catch(_){}curStream=null;}
   }
   function resetListener(){
-    if(curSR){var s=curSR;curSR=null;try{s.onresult=s.onerror=s.onend=s.onaudiostart=s.onsoundstart=null;s.abort();}catch(_){}}
+    if(curSR){var s=curSR;curSR=null;try{s.onresult=s.onerror=s.onend=s.onaudiostart=s.onsoundstart=s.onsoundend=s.onspeechstart=s.onspeechend=null;s.abort();}catch(_){}}
   }
   /* getUserMediaがBluetoothイヤホン等の切り替えで応答しなくなることがあるため、待ちすぎたら諦めてエラーにする */
   function withTimeout(p,ms,onLate){
@@ -200,12 +435,13 @@
   }
 
   async function startRecord(){
-    resetRecorder();claimMic();
+    resetRecorder();var generation=recordingGeneration;claimMic();
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-record-error',name:'unsupported',message:'getUserMedia not available'});return;}
     setStatus('busy','マイクを準備しています…','許可を聞かれたら「許可」を選んでください。');
     var stream;
     try{stream=await getMicStream({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});}
-    catch(e){send({type:'vb-record-error',name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','許可の設定を確かめてから、元のアプリでもう一度お試しください。');return;}
+    catch(e){if(generation!==recordingGeneration)return;send({type:'vb-record-error',name:e&&e.name,message:e&&e.message});setStatus('err','マイクを使えませんでした','許可の設定を確かめてから、元のアプリでもう一度お試しください。');return;}
+    if(generation!==recordingGeneration){stopTracks(stream);return;}
     curStream=stream;
     var mime=pickMime(),rec;
     try{rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);}
@@ -221,6 +457,7 @@
       setStatus('busy','音声を送っています…','');
       try{
         var b64=await blobToBase64(blob);
+        if(generation!==recordingGeneration)return;
         send({type:'vb-audio',base64:b64,mime:blob.type,durationMs:durationMs});
         setStatus('ok','送りました。元のアプリの画面に戻ってください。','');
       }catch(e3){send({type:'vb-record-error',name:'encode',message:String(e3&&e3.message||e3)});}
@@ -230,31 +467,35 @@
     send({type:'vb-record-started'});
     setStatus('rec','● 録音中です','話し終えたら、元のアプリの画面で止めてください。');
   }
-  function stopRecord(){if(curRec&&curRec.state!=='inactive'){try{curRec.stop();}catch(_){}}else if(!curRec)send({type:'vb-record-cancelled'});}
+  function stopRecord(){if(curRec&&curRec.state!=='inactive'){try{curRec.stop();}catch(_){}}else if(!curRec){resetRecorder();send({type:'vb-record-cancelled'});}}
   function cancelRecord(){
     if(curRec){
       curRec._cancelled=true;
       try{if(curRec.state!=='inactive')curRec.stop();else{stopTracks(curStream);curStream=null;curRec=null;send({type:'vb-record-cancelled'});}}catch(_){}
-    }else send({type:'vb-record-cancelled'});
+    }else{resetRecorder();send({type:'vb-record-cancelled'});}
   }
 
-  function startListen(lang,continuous){
+  function startListen(lang,continuous,sessionId){
     if(!SR){send({type:'vb-listen-error',code:'not-supported'});return;}
     resetListener();
     var sr;try{sr=new SR();}catch(e){send({type:'vb-listen-error',code:'start'});return;}
-    curSR=sr;sr.lang=lang||'ja-JP';sr.continuous=!!continuous;sr.interimResults=true;
-    sr.onresult=function(ev){var c=collect(ev);send({type:'vb-listen-result',fin:c.fin,itm:c.itm});};
-    sr.onaudiostart=function(){send({type:'vb-listen-audio'});};
-    sr.onsoundstart=function(){send({type:'vb-listen-sound'});};
-    sr.onerror=function(ev){var c=ev&&ev.error;send({type:'vb-listen-error',code:c||'error'});};
-    sr.onend=function(){if(curSR===sr)curSR=null;send({type:'vb-listen-end'});setStatus('wait','待機中…（このまま置いておいてください）','');};
+    curSR=sr;sr._sessionId=sessionId||'';
+    function emit(msg){if(curSR!==sr)return;msg.sessionId=sr._sessionId;send(msg);}
+    sr.lang=lang||'ja-JP';sr.continuous=!!continuous;sr.interimResults=true;
+    sr.onresult=function(ev){if(curSR!==sr)return;var c=collect(ev);emit({type:'vb-listen-result',fin:c.fin,itm:c.itm});};
+    sr.onaudiostart=function(){emit({type:'vb-listen-audio'});};
+    sr.onsoundstart=function(){emit({type:'vb-listen-sound'});};
+    sr.onspeechstart=function(){emit({type:'vb-listen-speech'});};
+    sr.onspeechend=sr.onsoundend=function(){emit({type:'vb-listen-silence'});};
+    sr.onerror=function(ev){var c=ev&&ev.error;emit({type:'vb-listen-error',code:c||'error'});};
+    sr.onend=function(){if(curSR!==sr)return;emit({type:'vb-listen-end'});curSR=null;setStatus('wait','待機中…（このまま置いておいてください）','');};
     claimMic();
     try{sr.start();}catch(e2){curSR=null;send({type:'vb-listen-error',code:'start'});return;}
-    send({type:'vb-listen-started',v:2});
+    emit({type:'vb-listen-started',v:3});
     setStatus('rec','● 聞いています','元のアプリの画面で話してください。');
   }
   function stopListen(){if(curSR){try{curSR.stop();}catch(_){}}}
-  function abortListen(){if(curSR){var sr=curSR;curSR=null;try{sr.onresult=sr.onerror=sr.onend=sr.onaudiostart=sr.onsoundstart=null;sr.abort();}catch(_){}}setStatus('wait','待機中…（このまま置いておいてください）','');}
+  function abortListen(){if(curSR){var sr=curSR;curSR=null;try{sr.onresult=sr.onerror=sr.onend=sr.onaudiostart=sr.onsoundstart=sr.onsoundend=sr.onspeechstart=sr.onspeechend=null;sr.abort();}catch(_){}}setStatus('wait','待機中…（このまま置いておいてください）','');}
 
   async function micCheck(){
     if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){send({type:'vb-mic-check-result',ok:false,name:'unsupported',message:'getUserMedia not available'});return;}
@@ -276,8 +517,8 @@
     if(curRec){curRec._cancelled=true;resetRecorder();send({type:'vb-record-error',name:'taken',message:'another tab'});}
   };
   /* ---- v346: 見ながら話す（カメラ・画面共有）。アプリで送信した時だけ1枚撮って、アプリにだけ返す ---- */
-  var CAPS={look:1,screen:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),camera:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)};
-  var lk={stream:null,video:null,src:'',facing:'',timer:0,previewMax:320,clickReq:null,prevBusy:false,prevAt:0,miniT:0,icBad:0};
+  var CAPS={look:1,live353:1,screen:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),camera:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)};
+  var lk={stream:null,video:null,src:'',facing:'',timer:0,previewMax:320,clickReq:null,prevBusy:false,prevAt:0,miniT:0,icBad:0,generation:0,starting:false};
   /* アプリの画面にかぶらないよう、少したったら小さな赤い点にたたむ（押すと、もう一度ひらく） */
   function lkPillMiniLater(ms){clearTimeout(lk.miniT);lk.miniT=setTimeout(function(){if(lk.stream)document.getElementById('lookPill').classList.add('mini');},ms);}
   document.getElementById('lookPill').addEventListener('click',function(ev){var el=document.getElementById('lookPill');if(el.classList.contains('mini')){ev.preventDefault();el.classList.remove('mini');lkPillMiniLater(6000);}});
@@ -300,18 +541,21 @@
     var id=String(d.id||'').slice(0,40),src=d.source==='screen'?'screen':'camera',facing=d.facing==='user'?'user':'environment';
     send({type:'vb-look-ack',id:id});
     lookStop('restart',true);
+    var generation=lk.generation;lk.starting=true;
     lk.previewMax=Math.max(160,Math.min(480,Number(d.previewMax)||320));
     if(src==='screen'?!CAPS.screen:!CAPS.camera){send({type:'vb-look-error',id:id,source:src,name:'NotSupportedError',message:'not supported in this browser'});return;}
     var st;
-    try{st=await lkGet(src,facing);}
+    try{st=await lkGet(src,facing);if(generation!==lk.generation){stopTracks(st);return;}}
     catch(e){
-      if(lkNeedsGesture(e)){lkAskClick(id,src,facing);return;}
+      if(generation!==lk.generation)return;
+      lk.starting=false;
+      if(lkNeedsGesture(e)){lkAskClick(id,src,facing,generation);return;}
       send({type:'vb-look-error',id:id,source:src,name:e&&e.name,message:e&&e.message});lkUi();return;
     }
-    lkBegin(id,src,facing,st);
+    lkBegin(id,src,facing,st,generation);
   }
-  function lkAskClick(id,src,facing){
-    lk.clickReq={id:id,src:src,facing:facing};
+  function lkAskClick(id,src,facing,generation){
+    lk.clickReq={id:id,src:src,facing:facing,generation:generation};
     document.getElementById('lookClickText').textContent=src==='screen'?'見ながら話す：下のボタンを押して、共有する画面を選んでください。':'見ながら話す：下のボタンを押すと、カメラが始まります。';
     document.getElementById('lookClickGo').textContent=src==='screen'?'共有する画面を選ぶ':'カメラを始める';
     document.getElementById('lookClick').classList.add('show');
@@ -321,18 +565,19 @@
   document.getElementById('lookClickGo').addEventListener('click',async function(){
     var r=lk.clickReq;if(!r)return;lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');
     var st;
-    try{st=await lkGet(r.src,r.facing);}
-    catch(e){send({type:'vb-look-error',id:r.id,source:r.src,name:e&&e.name,message:e&&e.message});lkUi();return;}
-    lkBegin(r.id,r.src,r.facing,st);
+    try{st=await lkGet(r.src,r.facing);if(r.generation!==lk.generation){stopTracks(st);return;}}
+    catch(e){if(r.generation!==lk.generation)return;send({type:'vb-look-error',id:r.id,source:r.src,name:e&&e.name,message:e&&e.message});lkUi();return;}
+    lkBegin(r.id,r.src,r.facing,st,r.generation);
   });
   document.getElementById('lookClickNo').addEventListener('click',function(){
     var r=lk.clickReq;lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');
     if(r)send({type:'vb-look-error',id:r.id,source:r.src,name:'NotAllowedError',message:'cancelled on relay page'});
   });
-  async function lkBegin(id,src,facing,st){
-    lk.stream=st;lk.src=src;lk.facing=facing;lk.icBad=0;lk.prevBusy=false;
+  async function lkBegin(id,src,facing,st,generation){
+    if(generation!==lk.generation){stopTracks(st);return;}
+    lk.starting=false;lk.stream=st;lk.src=src;lk.facing=facing;lk.icBad=0;lk.prevBusy=false;
     var v=lkVideo();v.srcObject=st;
-    try{await v.play();}catch(_){}
+    try{var playing=v.play();if(playing&&playing.catch)playing.catch(function(){});}catch(_){}
     st.getVideoTracks().forEach(function(tr){tr.addEventListener('ended',function(){if(lk.stream===st)lookStop('ended');});});
     var tr0=st.getVideoTracks()[0],set=(tr0&&tr0.getSettings)?tr0.getSettings():{};
     send({type:'vb-look-started',id:id,source:src,label:String((tr0&&tr0.label)||'').slice(0,120),w:set.width|0,h:set.height|0});
@@ -344,7 +589,6 @@
   /* 1枚取り出す。アプリをこのページの中に表示している形では、動いている映像（video）から取るのが速くて確実。
      別窓の形（後ろに回ると映像の更新が止まることがある）では、映像そのもの（ImageCapture）から先に取る。
      どちらも2秒で返らない時はあきらめて、もう一方を使う。 */
-  function lkTimeout(p,ms){return new Promise(function(res,rej){var t=setTimeout(function(){rej(named('TimeoutError'));},ms);p.then(function(v){clearTimeout(t);res(v);},function(e){clearTimeout(t);rej(e);});});}
   async function lkFromVideo(){
     var v=lk.video,t0=Date.now();
     if(v&&v.paused){try{var pp=v.play();if(pp&&pp.catch)pp.catch(function(){});}catch(_){}}
@@ -355,40 +599,47 @@
   async function lkFromTrack(){
     var st=lk.stream,tr=st&&st.getVideoTracks()[0];
     if(!(window.ImageCapture&&tr&&tr.readyState==='live')||lk.icBad>=3)throw named('NoImageCapture');
-    try{var bm=await lkTimeout(new ImageCapture(tr).grabFrame(),2000);lk.icBad=0;return {img:bm,w:bm.width,h:bm.height,bm:bm};}
+    try{var bm=await withTimeout(new ImageCapture(tr).grabFrame(),2000,function(b){if(b&&b.close)b.close();});lk.icBad=0;return {img:bm,w:bm.width,h:bm.height,bm:bm};}
     catch(e){lk.icBad=(lk.icBad|0)+1;throw e;}
   }
   async function lkGrab(maxSide,q){
-    if(!lk.stream)throw named('NoStream');
+    var generation=lk.generation,stream=lk.stream;
+    if(!stream)throw named('NoStream');
     var first=MODE==='popup'?lkFromTrack:lkFromVideo,second=MODE==='popup'?lkFromVideo:lkFromTrack,f;
-    try{f=await first();}catch(_){f=await second();}
-    var sc=Math.min(1,maxSide/Math.max(f.w,f.h)),cv=document.createElement('canvas');
-    cv.width=Math.max(1,Math.round(f.w*sc));cv.height=Math.max(1,Math.round(f.h*sc));
-    cv.getContext('2d').drawImage(f.img,0,0,cv.width,cv.height);
-    if(f.bm&&f.bm.close){try{f.bm.close();}catch(_){}}
-    var u=cv.toDataURL('image/jpeg',q);
-    return {data:u.slice(u.indexOf(',')+1),w:cv.width,h:cv.height};
+    try{
+      try{f=await first();}catch(e){
+        if(generation!==lk.generation||stream!==lk.stream)throw named('AbortError');
+        f=await second();
+      }
+      if(generation!==lk.generation||stream!==lk.stream)throw named('AbortError');
+      var sc=Math.min(1,maxSide/Math.max(f.w,f.h)),cv=document.createElement('canvas');
+      cv.width=Math.max(1,Math.round(f.w*sc));cv.height=Math.max(1,Math.round(f.h*sc));
+      cv.getContext('2d').drawImage(f.img,0,0,cv.width,cv.height);
+      var u=cv.toDataURL('image/jpeg',q);
+      return {data:u.slice(u.indexOf(',')+1),w:cv.width,h:cv.height};
+    }finally{if(f&&f.bm&&f.bm.close){try{f.bm.close();}catch(_){}}}
   }
   async function lkPreviewTick(){
     if(!lk.stream)return;
-    /* 前の取り出しが固まっていたら、4秒で見切って次へ進む */
     if(lk.prevBusy&&Date.now()-lk.prevAt<4000)return;
-    var my=Date.now();lk.prevBusy=true;lk.prevAt=my;
-    try{var r=await lkGrab(lk.previewMax,0.6);if(lk.stream&&lk.prevAt===my)send({type:'vb-look-preview',data:r.data,w:r.w,h:r.h,at:Date.now()});}catch(_){}
-    finally{if(lk.prevAt===my)lk.prevBusy=false;}
+    var generation=lk.generation,my=Date.now();lk.prevBusy=true;lk.prevAt=my;
+    try{var r=await lkGrab(lk.previewMax,0.6);if(generation===lk.generation&&lk.stream&&lk.prevAt===my)send({type:'vb-look-preview',data:r.data,w:r.w,h:r.h,at:Date.now()});}catch(_){}
+    finally{if(generation===lk.generation&&lk.prevAt===my)lk.prevBusy=false;}
   }
   async function lookFrame(d){
+    var generation=lk.generation;
     var id=String(d.id||'').slice(0,40),max=Math.max(320,Math.min(2560,Number(d.maxSide)||1280)),q=Math.max(0.5,Math.min(0.95,Number(d.quality)||0.82));
-    try{var r=await lkGrab(max,q);send({type:'vb-look-image',id:id,data:r.data,media:'image/jpeg',w:r.w,h:r.h,at:Date.now()});}
-    catch(e){send({type:'vb-look-error',id:id,source:lk.src,name:(e&&e.name)||'Error',message:(e&&e.message)||''});}
+    try{var r=await lkGrab(max,q);if(generation===lk.generation)send({type:'vb-look-image',id:id,data:r.data,media:'image/jpeg',w:r.w,h:r.h,at:Date.now()});}
+    catch(e){if(generation===lk.generation)send({type:'vb-look-error',id:id,source:lk.src,name:(e&&e.name)||'Error',message:(e&&e.message)||''});}
   }
   function lookStop(reason,silent){
-    clearInterval(lk.timer);lk.timer=0;
-    var had=!!lk.stream;
-    if(lk.stream){try{lk.stream.getTracks().forEach(function(t){t.stop();});}catch(_){}}
-    lk.stream=null;
+    if(glr&&glr.id&&reason!=='restart')glrEnd('カメラの共有が終了したためライブを終了しました。');
+    lk.generation++;lk.starting=false;
+    clearInterval(lk.timer);lk.timer=0;clearTimeout(lk.miniT);
+    var stream=lk.stream,had=!!stream;lk.stream=null;lk.prevBusy=false;lk.prevAt=0;
+    stopTracks(stream);
     if(lk.video){try{lk.video.srcObject=null;}catch(_){}}
-    if(lk.clickReq&&reason!=='restart'){lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');}
+    lk.clickReq=null;document.getElementById('lookClick').classList.remove('show');
     if(had&&!silent)send({type:'vb-look-ended',reason:reason||'stopped'});
     lkUi();
   }
@@ -396,7 +647,7 @@
     var on=!!lk.stream,name=lk.src==='screen'?'画面':(lk.facing==='user'?'内カメラ':'カメラ');
     if(MODE==='popup'){
       document.getElementById('lookPop').classList.toggle('show',on);
-      if(on)setStatus('rec','● '+name+'を共有中','元のアプリで送信した時だけ、1枚撮ってアプリに渡します。止める時は、下のボタンか元のアプリの「止める」を押してください。');
+      if(on)setStatus('rec','● '+name+'を共有中','通常チャットは送信時に撮影します。ライブ中は画像を定期的にGeminiへ送ります。止める時は共有停止またはライブ終了を押してください。');
       else if(/s-rec/.test(statusEl.className)&&!curRec&&!curSR)setStatus('wait','待機中…（このまま置いておいてください）','');
     }else{
       var pill=document.getElementById('lookPill');
@@ -408,19 +659,89 @@
   document.getElementById('lookPillStop').addEventListener('click',function(){lookStop('stopped-relay');});
   document.getElementById('lookPopStop').addEventListener('click',function(){lookStop('stopped-relay');});
 
+  /* v353: Live runs in the top-level media page; the app supplies ephemeral tokens only. */
+  var glr={id:'',engine:null,config:null,lastAlive:0,waits:{},seq:0,timer:0};
+  function glrSend(event){if(glr.id)send({type:'vb-gl-event',sessionId:glr.id,event:event});}
+  function glrToken(opts){
+    var id=glr.id,req='token-'+(++glr.seq);
+    return new Promise(function(resolve,reject){
+      var t=setTimeout(function(){delete glr.waits[req];reject(Error('アプリから接続情報が届きませんでした。'));},26000);
+      glr.waits[req]={resolve:function(r){clearTimeout(t);delete glr.waits[req];if(glr.id===id)resolve(r);else reject(Error('開始を取り消しました。'));},reject:function(e){clearTimeout(t);delete glr.waits[req];reject(e);}};
+      send({type:'vb-gl-token-request',sessionId:id,requestId:req,minutes:opts.minutes});
+    });
+  }
+  function glrEnd(reason){
+    if(!glr.id)return;var old=glr.id,e=glr.engine;
+    if(e){e.stop(reason);if(glr.id!==old)return;}
+    else glrSend({type:'stopped',message:reason||'ライブを終了しました。',metrics:null,usageReports:[],latenciesMs:[]});
+    glr.id='';glr.engine=null;glr.config=null;clearInterval(glr.timer);clearTimeout(glr.gateTimer);
+    Object.keys(glr.waits).forEach(function(k){glr.waits[k].reject(Error('ライブを終了しました。'));});
+    document.getElementById('glRelayGate').classList.remove('show');
+  }
+  function glrBegin(d){
+    glrEnd('新しいライブを開始します。');resetRecorder();resetListener();
+    if(!lk.stream){send({type:'vb-gl-event',sessionId:d.sessionId,event:{type:'stopped',message:'先にカメラの共有を開始してください。'}});return;}
+    glr.id=String(d.sessionId||'').slice(0,100);glr.lastAlive=Date.now();glr.config=d.config||{};
+    if(glr.config.model!=='gemini-3.8-live'){glrEnd('対応していないライブモデルです。');return;}
+    glr.config.prompt=String(glr.config.prompt||'').slice(0,14000);
+    glrSend({type:'state',state:'preparing',message:'表示された「カメラとマイクで会話を始める」を押してください。'});
+    document.getElementById('glRelayGate').classList.add('show');
+    glr.timer=setInterval(function(){if(!glr.id)return;if(Date.now()-glr.lastAlive>12000){glrEnd('アプリとの接続が切れたため終了しました。');lookStop('live-disconnected',true);return;}send({type:'vb-gl-pong',sessionId:glr.id});},1000);
+    glr.gateTimer=setTimeout(function(){if(glr.id&&!glr.engine){glrEnd('開始待ちを終了しました。');lookStop('live-cancelled',true);}},60000);
+  }
+  document.getElementById('glRelayGo').addEventListener('click',function(){
+    if(!glr.id||glr.engine)return;clearTimeout(glr.gateTimer);document.getElementById('glRelayGate').classList.remove('show');
+    var id=glr.id;
+    glr.engine=new window.GeminiCameraLive({
+      getToken:glrToken,
+      getMic:function(){return getMicStream({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});},
+      getFrame:async function(){var generation=lk.generation;if(!lk.stream)throw Error('共有が停止しました。');var f=await lkGrab(1024,0.75);if(!lk.stream||generation!==lk.generation)throw Error('共有が切り替わりました。');return {data:f.data,media:'image/jpeg',at:Date.now()};},
+      onEvent:function(e){
+        if(glr.id!==id)return;glrSend(e);
+        if(e.type==='stopped'){
+          glr.engine=null;glr.id='';glr.config=null;clearInterval(glr.timer);clearTimeout(glr.gateTimer);
+          Object.keys(glr.waits).forEach(function(k){glr.waits[k].reject(Error('ライブを終了しました。'));});
+          document.getElementById('glRelayGate').classList.remove('show');lookStop('live-ended',true);
+        }
+      }
+    });
+    glr.engine.start(glr.config);
+  });
+  document.getElementById('glRelayCancel').addEventListener('click',function(){glrEnd('開始を取り消しました。');lookStop('live-cancelled',true);});
+  function glrCommand(d){
+    if(d.type==='vb-gl-start'){glrBegin(d);return;}
+    if(!glr.id||d.sessionId!==glr.id)return;
+    glr.lastAlive=Date.now();
+    if(d.type==='vb-gl-heartbeat')return;
+    if(d.type==='vb-gl-stop'){glrEnd(String(d.reason||'ライブを終了しました。').slice(0,150));lookStop('live-ended',true);return;}
+    if(d.type==='vb-gl-token'){var w=glr.waits[d.requestId];if(w){if(d.error)w.reject(Error(String(d.error)));else w.resolve(d.result);}return;}
+    var e=glr.engine;if(!e||d.type!=='vb-gl-command')return;
+    if(d.command==='mute')e.setMuted(!!d.value);
+    else if(d.command==='pause-video')e.pauseVideo(!!d.value);
+    else if(d.command==='freeze')e.freeze(!!d.value);
+    else if(d.command==='external-speaking')e.setExternalSpeaking(!!d.value);
+    else if(d.command==='interrupt')e.interruptPlayback();
+    else if(d.command==='text')e.text(String(d.value||''));
+  }
+  document.addEventListener('visibilitychange',function(){if(document.hidden&&glr.id&&glr.engine){glrEnd('画面が閉じられたためライブを終了しました。');lookStop('live-hidden',true);}});
+
   function handleCommand(d){
+    if(typeof d.type==='string'&&d.type.indexOf('vb-gl-')===0){glrCommand(d);return;}
+    if(glr.id&&['vb-start-record','vb-start-listen','vb-reset'].indexOf(d.type)>=0)glrEnd('通常の音声入力へ切り替えました。');
     if(d.type==='vb-start-record')startRecord();
     else if(d.type==='vb-stop-record')stopRecord();
     else if(d.type==='vb-cancel-record')cancelRecord();
-    else if(d.type==='vb-start-listen')startListen(d.lang,d.continuous);
-    else if(d.type==='vb-stop-listen')stopListen();
-    else if(d.type==='vb-abort-listen')abortListen();
+    else if(d.type==='vb-start-listen')startListen(d.lang,d.continuous,d.sessionId);
+    else if(d.type==='vb-stop-listen'){if(!d.sessionId||(curSR&&curSR._sessionId===d.sessionId))stopListen();}
+    else if(d.type==='vb-abort-listen'){if(!d.sessionId||(curSR&&curSR._sessionId===d.sessionId))abortListen();}
     else if(d.type==='vb-mic-check')micCheck();
     else if(d.type==='vb-reset'){resetRecorder();resetListener();}
     else if(d.type==='vb-look-start')lookStart(d);
     else if(d.type==='vb-look-stop')lookStop('stopped',true);
     else if(d.type==='vb-look-frame')lookFrame(d);
   }
+
+  window.addEventListener('pagehide',function(){resetRecorder();resetListener();lookStop('pagehide',true);});
 
   /* ================= 別窓の中継ページ（これまで通り） ================= */
   if(MODE==='popup'){
@@ -471,8 +792,8 @@
   function stripParams(){
     try{
       var u=new URL(location.href);
-      if(!u.searchParams.has('app')&&!u.searchParams.has('migrate'))return;
-      u.searchParams.delete('app');u.searchParams.delete('migrate');
+      if(!u.searchParams.has('app'))return;
+      u.searchParams.delete('app');
       history.replaceState(null,'',u.pathname+(u.search?u.search:'')+u.hash);
     }catch(_){}
   }
@@ -485,12 +806,14 @@
   document.getElementById('bannerSetup').addEventListener('click',function(){hideBanner();showSetup(savedUrl());});
 
   function showSetup(prefill){
+    resetRecorder();resetListener();lookStop('setup',true);
     document.title='調査ノート（準備）';
     root.classList.remove('m-app','loading');root.classList.add('m-setup');
     var inp=document.getElementById('appUrl');inp.value=prefill||'';
     document.getElementById('setupErr').textContent='';
   }
   function startApp(u){
+    resetRecorder();resetListener();lookStop('app-change',true);
     document.title='調査ノート';
     root.classList.remove('m-setup');root.classList.add('m-app','loading');
     heard=false;appWin=null;appOrigin='';peer=null;
@@ -510,56 +833,21 @@
     startApp(v);
   });
 
-  /* ---- 前のアドレスのアプリから、会話の引っ越しを受け取る（?migrate=1 で開かれた時） ----
-     受け付けるのは、このページの中に表示したアプリと同じ場所（覚えた場所）から来たものだけ。
-     中のアプリ側でも、取り込む前に「取り込む／やめる」を聞く。 */
-  var mig={on:MIGRATE&&!!opener,payload:null,done:false};
-  function migForward(){
-    if(!mig.payload||mig.done||!appWin)return;
-    try{appWin.postMessage({type:'mig-data',payload:mig.payload},appOrigin);}catch(_){}
-  }
-  function migReply(msg){var pin=pinnedOrigin();if(!pin||!opener)return;try{opener.postMessage(msg,pin);}catch(_){}}
-
   window.addEventListener('message',function(ev){
     var d=ev.data;if(!d||typeof d!=='object'||typeof d.type!=='string')return;
-    /* 前のアドレスのアプリ（このページを開いた親）からの引っ越し */
-    if(mig.on&&opener&&ev.source===opener){
-      if(mig.done)return;
-      var pin=pinnedOrigin();
-      if(d.type==='mig-offer'){
-        if(!appWin||!pin)return;   /* 中のアプリがまだ表示されていない：表示されてから答える */
-        if(ev.origin!==pin){try{opener.postMessage({type:'mig-reject',reason:'origin'},ev.origin);}catch(_){}return;}
-        migReply({type:'mig-ready'});
-        return;
-      }
-      if(d.type==='mig-data'&&pin&&ev.origin===pin&&appWin){mig.payload=d.payload;migForward();}
-      return;
-    }
     /* 中のアプリからのメッセージだけを受け付ける */
     if(!isAppsOrigin(ev.origin)||!fromOurFrame(ev.source))return;
     if(appWin!==ev.source||appOrigin!==ev.origin){
       resetRecorder();resetListener();lookStop('app-changed',true);
       appWin=ev.source;appOrigin=ev.origin;peer=appWin;peerOrigin=appOrigin;
     }
-    /* 自分で表示したアプリの場所を覚える（別窓の中継・引っ越しは、この場所の相手にだけ応じる） */
+    /* 自分で表示したアプリの場所を覚える（別窓の中継は、この場所の相手にだけ応じる） */
     if(pinnedOrigin()!==appOrigin)setPinnedOrigin(appOrigin);
     heard=true;clearTimeout(bannerTimer);hideBanner();root.classList.remove('loading');
     if(d.type==='vb-hello'){
-      /* アプリが起動し直した：前回分のマイクを片づけ、引っ越しの途中ならもう一度渡す */
+      /* アプリが起動し直した：前回分のマイク・カメラを片づける */
       resetRecorder();resetListener();lookStop('app-restart',true);
       send({type:'vb-wrap-ready',v:2,caps:CAPS});
-      migForward();
-      return;
-    }
-    if(d.type==='mig-result'){
-      if(mig.on&&!mig.done){
-        mig.done=true;mig.payload=null;
-        migReply({type:'mig-result',ok:!!d.ok,cancelled:!!d.cancelled,added:d.added|0,updated:d.updated|0,kept:d.kept|0,total:d.total|0,error:d.error?String(d.error).slice(0,300):''});
-        /* このタブを読み込み直しても、?migrate が消えているので普通の「アプリを開く形」になる。
-           （親とのつながりは残す：もう一度「送る」を押された時に、同じタブで受け取れるように） */
-        mig.on=false;
-      }
-      stripParams();
       return;
     }
     handleCommand(d);
@@ -568,7 +856,7 @@
   var url=savedUrl();
   if(location.hash==='#setup'||!validAppUrl(url))showSetup(url);
   else startApp(url);
-  if(!MIGRATE)stripParams();
+  stripParams();
 })();
 </script>
 </body>
