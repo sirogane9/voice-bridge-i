@@ -3,9 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>マイク・カメラ中継ページ v423</title>
+<title>マイク・カメラ中継ページ v441</title>
 <!-- v352.1: 発話開始・終了と認識セッションIDを中継。旧会話引っ越しを削除。 -->
 <!-- v423: アプリで会話している間（アプリから vb-wake が来ている間）だけ、このページで画面を消さないようにする（アプリの枠の中からは頼めないため）。アプリからの合図が90秒来なければ、自分でやめる。この形の時だけ（別窓の中継では使わない）。 -->
+<!-- v441: アプリのアドレスの入力を、本当に最初の1回だけにする。パソコンの再起動などでブラウザがサイトのデータを消しても、「デスクトップ用のショートカット（.url）」か「ブックマーク用のリンク」から開けば、入れ直さずにアプリが開く（リンクの #app= の部分は # より後ろなので、GitHub のサーバーには送られない。開いたらすぐアドレス欄からも消す）。手で入れて開いた時は、ショートカットを作るよう案内する。覚えたアドレスを消されにくくするよう、ブラウザに「この場所のデータを残してほしい」と頼む。 -->
 <style>
   html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
   .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
@@ -39,6 +40,14 @@
   #setup label{display:block;font-size:13px;font-weight:700;margin:18px 0 6px;color:#f0f0f0;}
   #appUrl{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,.4);background:#14171c;color:#fff;font-size:14px;}
   #openApp{display:block;width:100%;margin-top:14px;padding:11px;border-radius:10px;border:0;background:#d3b47f;color:#231a0c;font-weight:700;font-size:15px;}
+  /* v441: 次から入力しなくて済むように */
+  #keepBox{margin-top:22px;padding:12px 14px;border:1px solid rgba(211,180,127,.55);border-radius:10px;background:rgba(211,180,127,.08);}
+  #keepBox .keepTitle{font-weight:700;color:#f3e2bf;margin:0 0 4px;}
+  #keepBox button{display:block;width:100%;margin-top:10px;padding:10px;border-radius:10px;border:1px solid #d3b47f;background:#2a2318;color:#f3e2bf;font-weight:700;font-size:14px;}
+  #keepMsg{font-size:13px;color:#cfe8c8;min-height:1.4em;margin-top:8px;}
+  #keepBanner{position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));display:none;z-index:30;background:#EAF4E4;color:#1F3A12;border:1px solid #7FAF62;border-left:5px solid #3E6B2F;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.6;box-shadow:0 2px 10px rgba(0,0,0,.25);}
+  #keepBanner.show{display:block;}
+  #keepBanner button{margin:8px 8px 0 0;padding:6px 12px;color:#1F3A12;border:1px solid #3E6B2F;border-radius:6px;background:#fff;font-size:13px;}
   #setupErr{color:#FFB3B8;font-size:13px;min-height:1.4em;margin-top:10px;}
   /* v346: 見ながら話す（カメラ・画面共有） */
   #lookPill{position:fixed;top:calc(6px + env(safe-area-inset-top));left:6px;z-index:6;display:none;align-items:center;gap:6px;padding:4px 6px 4px 4px;border-radius:16px;background:rgba(40,10,14,.88);border:1px solid #E0626E;color:#FFE3E6;font-size:11px;box-shadow:0 2px 10px rgba(0,0,0,.35);}
@@ -314,6 +323,14 @@
   <input type="url" id="appUrl" placeholder="https://script.google.com/macros/s/……/exec" autocapitalize="off" autocorrect="off" spellcheck="false">
   <button type="button" id="openApp">このアドレスで開く</button>
   <div id="setupErr" role="alert"></div>
+  <div id="keepBox">
+    <p class="keepTitle">次から入力しなくて済むように（パソコンの再起動のあとも）</p>
+    <p class="note">ブラウザが「閉じる時にサイトのデータを消す」設定になっていると、覚えたアドレスも消えて、毎回この画面になります。下のどちらかを一度作っておくと、そこから開けば、アドレスを入れ直さずにアプリが開きます（作るのは1回だけで、ずっと使えます）。</p>
+    <button type="button" id="keepFile">デスクトップ用のショートカットを保存（.url）</button>
+    <button type="button" id="keepCopy">ブックマーク用のリンクをコピー</button>
+    <div id="keepMsg" role="status"></div>
+    <p class="note">ショートカットは、保存したファイルをデスクトップに置いて、ダブルクリックで開きます。リンクは、ブラウザのブックマークの「URL」に貼ってください。どちらも、この端末の中にだけ置くもので、このページ（GitHub）には何も書き込みません。中にアプリのアドレスが入っているので、ほかの人には渡さないでください。</p>
+  </div>
   <p class="note">貼ったアドレスは、この端末のブラウザの中にだけ覚えておきます。このページ（GitHub）には書き込まれないので、ほかの人に見られることはありません。また、アプリは持ち主のGoogleアカウントでしか開けないので、ほかの人がこのページを開いてもアプリの中身は見えません。</p>
   <p class="note">アドレスを入れ直したい時は、このページのアドレスの最後に <b>#setup</b> を付けて開いてください。</p>
 </div>
@@ -323,6 +340,10 @@
 <div id="lookPill" role="status" aria-live="polite" title="見ながら話す：共有中（押すと、止めるボタンが出ます）"><div id="lookPillPrev"></div><span id="lookPillText"></span><button type="button" id="lookPillStop">止める</button></div>
 <div id="lookClick" role="dialog" aria-modal="true" aria-labelledby="lookClickText"><div class="box"><div id="lookClickText"></div><button type="button" id="lookClickGo">共有する画面を選ぶ</button><button type="button" id="lookClickNo">やめる</button></div></div>
 <div id="glRelayGate" role="dialog" aria-modal="true" aria-labelledby="glRelayTitle"><div class="box"><div id="glRelayTitle">カメラとマイクでGeminiと会話します</div><p>音声の再生を有効にするため、このボタンを押してください。</p><button id="glRelayGo" type="button">カメラとマイクで会話を始める</button><button id="glRelayCancel" type="button">やめる</button></div></div>
+<div id="keepBanner" role="status">
+  <div id="keepBannerText">次から入力しなくて済むように、このアプリを開くショートカットを作っておきませんか？（パソコンを再起動したあとも、そこから開けば、アドレスを入れ直さずに開けます）</div>
+  <button type="button" id="keepBannerFile">ショートカットを保存（.url）</button><button type="button" id="keepBannerCopy">ブックマーク用のリンクをコピー</button><button type="button" id="keepBannerClose">閉じる</button>
+</div>
 <div id="banner" role="status">
   <div id="bannerText"></div>
   <button type="button" id="bannerSetup">アドレスを入れ直す</button><button type="button" id="bannerClose">閉じる</button>
@@ -797,8 +818,30 @@
   var appWin=null,appOrigin='';
   var bannerTimer=0,heard=false;
   function validAppUrl(u){return /^https:\/\/script\.google\.com\/(?:[^\s?#]*\/)?(?:exec|dev)(?:[?#][^\s]*)?$/.test(String(u||''));}
-  function savedUrl(){try{return localStorage.getItem(STORE_KEY)||'';}catch(_){return '';}}
-  function saveUrl(u){try{localStorage.setItem(STORE_KEY,u);}catch(_){}}
+  var memUrl='';   /* ブラウザに覚えておけない時も、いま開いている間は使う */
+  function savedUrl(){var v='';try{v=localStorage.getItem(STORE_KEY)||'';}catch(_){v='';}return v||memUrl;}
+  function saveUrl(u){memUrl=u;try{localStorage.setItem(STORE_KEY,u);}catch(_){}askPersist();}
+  /* v441: 覚えたアドレスを、ブラウザがなるべく消さないように頼む（消す設定の時は、下のショートカットで開けば大丈夫） */
+  function askPersist(){try{if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(function(){});}catch(_){}}
+  /* v441: 「最初の1回だけ」のためのショートカット・ブックマーク用のリンク。
+     アドレスの「#app=…」は # より後ろなので、ブラウザから GitHub のサーバーへは送られない。開いたら、すぐアドレス欄からも消す */
+  function b64uEnc(t){var b=new TextEncoder().encode(String(t)),bin='';for(var i=0;i<b.length;i++)bin+=String.fromCharCode(b[i]);return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');}
+  function b64uDec(t){t=String(t||'').replace(/-/g,'+').replace(/_/g,'/');while(t.length%4)t+='=';var bin=atob(t),b=new Uint8Array(bin.length);for(var i=0;i<bin.length;i++)b[i]=bin.charCodeAt(i);return new TextDecoder().decode(b);}
+  function keepLink(u){return location.origin+location.pathname+'#app='+b64uEnc(u);}
+  function hashToken(){var m=/^#app=([A-Za-z0-9_-]{8,4000})$/.exec(location.hash||'');if(!m)return null;try{return b64uDec(m[1]);}catch(_){return '';}}
+  function clearHash(){try{history.replaceState(null,'',location.pathname+location.search);}catch(_){}}
+  function keepSaveFile(u){
+    var a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['[InternetShortcut]\r\nURL='+keepLink(u)+'\r\n'],{type:'application/octet-stream'}));
+    a.download='調査ノート.url';a.style.display='none';document.body.appendChild(a);a.click();
+    setTimeout(function(){try{URL.revokeObjectURL(a.href);a.remove();}catch(_){}},3000);
+  }
+  async function keepCopyLink(u){
+    var t=keepLink(u);
+    try{await navigator.clipboard.writeText(t);return true;}
+    catch(_){try{var ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();var ok=document.execCommand('copy');ta.remove();return ok;}catch(__){return false;}}
+  }
+  function hideKeepBanner(){document.getElementById('keepBanner').classList.remove('show');}
+  function showKeepBanner(){document.getElementById('keepBanner').classList.add('show');}
   /* Apps Scriptのアプリ本体は *.googleusercontent.com で動いている */
   function isAppsOrigin(o){return /^https:\/\/([a-z0-9-]+\.)+googleusercontent\.com$/.test(String(o||''));}
   /* このページに置いた枠（アプリ）の中からのメッセージかどうか（親をたどって確かめる） */
@@ -830,7 +873,7 @@
   document.getElementById('bannerSetup').addEventListener('click',function(){hideBanner();showSetup(savedUrl());});
 
   function showSetup(prefill){
-    resetRecorder();resetListener();lookStop('setup',true);
+    resetRecorder();resetListener();lookStop('setup',true);hideKeepBanner();
     document.title='調査ノート（準備）';
     root.classList.remove('m-app','loading');root.classList.add('m-setup');
     var inp=document.getElementById('appUrl');inp.value=prefill||'';
@@ -849,12 +892,24 @@
       showBanner('アプリからの返事がまだありません。アプリが普通に表示されていれば、この案内は閉じて大丈夫です。表示されない時は、①Code.gsへの1行追加と再デプロイ、②アプリのアドレス、③Googleにログインしているか、を確かめてみてください。');
     },30000);
   }
+  function keepTarget(){
+    var v=String(document.getElementById('appUrl').value||'').trim();
+    if(!validAppUrl(v)){document.getElementById('keepMsg').textContent='';document.getElementById('setupErr').textContent='先に、上の欄にアプリのアドレスを貼ってください（「https://script.google.com/」で始まり「/exec」で終わるもの）。';return '';}
+    document.getElementById('setupErr').textContent='';return v;
+  }
+  document.getElementById('keepFile').addEventListener('click',function(){var v=keepTarget();if(!v)return;keepSaveFile(v);document.getElementById('keepMsg').textContent='「調査ノート.url」を保存しました。ダウンロードのフォルダからデスクトップへ移して、次からはそれをダブルクリックして開いてください。';});
+  document.getElementById('keepCopy').addEventListener('click',async function(){var v=keepTarget();if(!v)return;var ok=await keepCopyLink(v);document.getElementById('keepMsg').textContent=ok?'リンクをコピーしました。ブラウザのブックマークを作って、「URL」の欄に貼ってください。':'コピーできませんでした。「デスクトップ用のショートカットを保存」を使ってください。';});
+  document.getElementById('keepBannerFile').addEventListener('click',function(){var u=savedUrl();if(!validAppUrl(u))return;keepSaveFile(u);document.getElementById('keepBannerText').textContent='「調査ノート.url」を保存しました。ダウンロードのフォルダからデスクトップへ移して、次からはそれをダブルクリックして開いてください。';});
+  document.getElementById('keepBannerCopy').addEventListener('click',async function(){var u=savedUrl();if(!validAppUrl(u))return;var ok=await keepCopyLink(u);document.getElementById('keepBannerText').textContent=ok?'リンクをコピーしました。ブラウザのブックマークを作って、「URL」の欄に貼ってください。':'コピーできませんでした。「ショートカットを保存」を使ってください。';});
+  document.getElementById('keepBannerClose').addEventListener('click',hideKeepBanner);
   document.getElementById('openApp').addEventListener('click',function(){
     var v=String(document.getElementById('appUrl').value||'').trim();
     if(!validAppUrl(v)){document.getElementById('setupErr').textContent='アドレスの形が違うようです。「https://script.google.com/」で始まり「/exec」で終わるアドレスを貼ってください。';return;}
     saveUrl(v);
     try{if(location.hash==='#setup')history.replaceState(null,'',location.pathname+location.search);}catch(_){}
     startApp(v);
+    /* v441: 手で入れて開いた時は、次から入れなくて済むショートカットを案内する */
+    setTimeout(showKeepBanner,1500);setTimeout(hideKeepBanner,90000);
   });
 
   window.addEventListener('message',function(ev){
@@ -878,8 +933,10 @@
     handleCommand(d);
   });
 
+  var tok=hashToken(),tokBad=false;
+  if(tok!==null){clearHash();if(validAppUrl(tok))saveUrl(tok);else tokBad=true;}
   var url=savedUrl();
-  if(location.hash==='#setup'||!validAppUrl(url))showSetup(url);
+  if(location.hash==='#setup'||!validAppUrl(url)){showSetup(url);if(tokBad)document.getElementById('setupErr').textContent='ショートカット（リンク）の中のアドレスを読めませんでした。アプリのアドレスを貼って、ショートカットを作り直してください。';}
   else startApp(url);
   stripParams();
 })();
