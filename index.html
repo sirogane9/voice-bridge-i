@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>マイク・カメラ中継ページ v441</title>
+<title>マイク・カメラ中継ページ v483</title>
 <!-- v352.1: 発話開始・終了と認識セッションIDを中継。旧会話引っ越しを削除。 -->
 <!-- v423: アプリで会話している間（アプリから vb-wake が来ている間）だけ、このページで画面を消さないようにする（アプリの枠の中からは頼めないため）。アプリからの合図が90秒来なければ、自分でやめる。この形の時だけ（別窓の中継では使わない）。 -->
 <!-- v441: アプリのアドレスの入力を、本当に最初の1回だけにする。パソコンの再起動などでブラウザがサイトのデータを消しても、「デスクトップ用のショートカット（.url）」か「ブックマーク用のリンク」から開けば、入れ直さずにアプリが開く（リンクの #app= の部分は # より後ろなので、GitHub のサーバーには送られない。開いたらすぐアドレス欄からも消す）。手で入れて開いた時は、ショートカットを作るよう案内する。覚えたアドレスを消されにくくするよう、ブラウザに「この場所のデータを残してほしい」と頼む。 -->
+<!-- v483: アプリから「現在地を教えて」（vb-geo-request）が来た時だけ、このページで位置情報を1回取ってアプリへ返す（vb-geo-result／vb-geo-error）。アプリの枠の中（Apps Script）では位置情報を使えないことがあるため。位置は返すだけで、このページには残さない。 -->
 <style>
   html,body{margin:0;padding:0;background:#20242b;color:#eee;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif;}
   .wrap{max-width:420px;margin:0 auto;padding:28px 20px;text-align:center;box-sizing:border-box;}
@@ -539,7 +540,7 @@
     if(curRec){curRec._cancelled=true;resetRecorder();send({type:'vb-record-error',name:'taken',message:'another tab'});}
   };
   /* ---- v346: 見ながら話す（カメラ・画面共有）。アプリで送信した時だけ1枚撮って、アプリにだけ返す ---- */
-  var CAPS={look:1,live353:1,wake:('wakeLock' in navigator)?1:0,screen:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),camera:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)};
+  var CAPS={look:1,live353:1,geo:('geolocation' in navigator)?1:0,wake:('wakeLock' in navigator)?1:0,screen:!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia),camera:!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia)};
   var lk={stream:null,video:null,src:'',facing:'',timer:0,previewMax:320,clickReq:null,prevBusy:false,prevAt:0,miniT:0,icBad:0,generation:0,starting:false};
   /* アプリの画面にかぶらないよう、少したったら小さな赤い点にたたむ（押すと、もう一度ひらく） */
   function lkPillMiniLater(ms){clearTimeout(lk.miniT);lk.miniT=setTimeout(function(){if(lk.stream)document.getElementById('lookPill').classList.add('mini');},ms);}
@@ -765,6 +766,26 @@
 
   window.addEventListener('pagehide',function(){resetRecorder();resetListener();lookStop('pagehide',true);});
 
+  /* v483: 現在地を1回だけ取って、アプリへ返す（地図の「近くの場所」用）。このページには残さない */
+  var geoBusy=0;
+  function geoRequest(d){
+    var id=String(d&&d.id||'').slice(0,60),requestPeer=peer,requestOrigin=peerOrigin;
+    function reply(msg){if(!requestPeer||requestPeer!==peer||requestOrigin!==peerOrigin)return;try{requestPeer.postMessage(msg,requestOrigin);}catch(_){}}
+    if(!('geolocation' in navigator)){reply({type:'vb-geo-error',id:id,code:0,name:'NotSupportedError',message:'unsupported'});return;}
+    if(geoBusy>3){reply({type:'vb-geo-error',id:id,code:0,name:'Busy',message:'busy'});return;}
+    geoBusy++;
+    var timeout=Math.min(30000,Math.max(3000,Number(d&&d.timeout)||15000)),maxAge=Math.min(600000,Math.max(0,Number(d&&d.maxAge)||60000));
+    try{
+      navigator.geolocation.getCurrentPosition(function(p){
+        geoBusy=Math.max(0,geoBusy-1);var c=p&&p.coords||{};
+        reply({type:'vb-geo-result',id:id,lat:Number(c.latitude),lng:Number(c.longitude),acc:Number(c.accuracy)||0,at:Number(p&&p.timestamp)||Date.now()});
+      },function(e){
+        geoBusy=Math.max(0,geoBusy-1);
+        reply({type:'vb-geo-error',id:id,code:Number(e&&e.code)||0,message:String(e&&e.message||'').slice(0,120)});
+      },{enableHighAccuracy:!!(d&&d.high),timeout:timeout,maximumAge:maxAge});
+    }catch(err){geoBusy=Math.max(0,geoBusy-1);reply({type:'vb-geo-error',id:id,code:0,message:String(err&&err.message||err).slice(0,120)});}
+  }
+
   /* v423: アプリの会話中は、このページで画面を消さない（アプリの枠の中からは頼めないため）。
      アプリが30秒ごとに「まだ会話中」と送ってくる。90秒来なければ、自分でやめる（アプリが閉じた時など）。 */
   var wk={want:false,until:0,lock:null,busy:false,again:false,TTL:90000};
@@ -930,6 +951,7 @@
       return;
     }
     if(d.type==='vb-wake'){wakeSet(!!d.on);return;}
+    if(d.type==='vb-geo-request'){geoRequest(d);return;}  /* v483 */
     handleCommand(d);
   });
 
